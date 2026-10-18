@@ -2299,3 +2299,56 @@ Comparative zero-miss native-fence-only runs:
 KMS success alone is separately quantifying the
 ~0.08–0.12% staging-pair losses before planning
 active shutter glasses.
+
+
+### Diagnostic extension after run 24: intermediate right-eye fence probe
+
+Commit `f7eda9d018ad9f13d948e59f8004261196f5d57e`
+adds a **nonblocking, diagnostic-only** fence
+probe on the right-eye KMS refresh **immediately
+following the second failed left-eye fence poll**
+for a pending stereo pair. It is only attempted
+when all of the following hold:
+- native EGL fences enabled, pending complete;
+- current hardware target is **R**;
+- that pending generation has already been
+  deferred on **at least two** L attempts;
+- the target MSC equals the second failed
+  L target MSC + 1, and no R sample is stored.
+
+The additional `poll(fd, timeout=0)` operations
+never block the KMS worker and never promote a
+new pair on an R boundary. Only rare two-deferral
+pairs incur this extra diagnostic overhead.
+
+The existing discard event log now includes
+`intermediate_R_probe_age_ms`,
+`intermediate_R_probe_msc`,
+`intermediate_R_fence_L`, and
+`intermediate_R_fence_R` (both 1=ready,
+0=not ready, -1=poll error/unavailable/no sample).
+An age of -1 and MSC 0 mean no intermediate
+R sample was obtained.
+
+At 120Hz this R probe occurs approximately
+**8.33ms** after the last failed L check and,
+based on run 24, approximately 1.4–1.9ms before
+the newest pair overwrites the old one. Thus
+it should usually tell whether the pair had
+become ready by that **last intermediate R**
+slot, even though promoting at that point would
+produce mismatched L/R film generations and is
+prohibited.
+
+This adds logging/telemetry only and **does not
+address staging pair discards**. Follow-up run:
+rebuild mpv and play 10-15min with
+`NATIVE_FENCE=1` and `MIN_PAIR_AGE_MS=0`,
+then compare the new R-probe fields in each
+discard record with the existing first/last
+L deferral ages. If ready at R, stage more
+safely or change producer timing instead of
+allowing an unsafe mid-pair replacement.
+If still not ready at R, optimize GPU fence
+completion / resource pressure before
+considering deeper pair queues. 
