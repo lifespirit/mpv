@@ -243,3 +243,93 @@ the reaction time for parity corrections. Neither outcome should be
 assumed before measurements. If neither is sufficient, change
 the renderer to select the eye by *intended actual DRM MSC slot* and
 separate its 120Hz scanout rhythm from mpv's video-frame delivery.
+
+## Fourth opt-in experiment: MSC-targeted queue alignment (NO USB)
+
+The old `feature/drm-stereo-diagnostics` branch remains unchanged. This
+experiment lives on `feature/drm-stereo-msc-queue`.
+
+**Previous measurements:** a one-buffer swapchain produced approximately
+66.77 confirmed flips/s and thousands of missed physical slots; depth=3
+reached 119.914 average flips/s over 72 windows (6 skipped slots, 10
+wrong-eye presentations), versus 119.870 average over 63 windows at depth=2
+(8 skipped slots, 11 wrong-eye presentations). These runs differ in
+duration and startup conditions, so the small difference is not proof of
+an optimal queue depth.
+
+### Changes
+
+Enable with `MPV_DRM_STEREO_SBS=1 MPV_DRM_STEREO_SLOT=1`:
+
+- After the first confirmed KMS flip, every subsequent draw selects L/R
+  from the **estimated target** MSC:
+  `last_confirmed_msc + pending_gbm_buffers + 1`.
+  During initial queue priming, use the old alternating draw sequence
+  until a hardware MSC and initial eye have been established.
+- A GBM frame retains its chosen eye, estimated target MSC, and CPU-side
+  draw timestamp. Successful atomic commits also retain their metadata.
+- Immediately before committing the next pending BO, check the expected
+  left/right phase for `last_confirmed_msc + 1`. If the next waiting
+  BO has the wrong eye and its immediate successor has the correct eye,
+  discard the stale **waiting** BO. Never discard the scanned-out BO
+  or a BO with an in-flight atomic commit. Recovery can consume
+  extra queued buffers and cannot repair an already-shown wrong eye.
+- Once primed, attempt at least one pending flip per render call even when
+  a recovery discard has temporarily reduced the queue below
+  `--swapchain-depth`. Wait for its page-flip callback before
+  computing the queue depth for the next prediction.
+- Record `slot`, `pending`, `discards`, `window_discards`,
+  `target_misses`, `window_target_misses`,
+  `max_commit_callback_ms` and `max_draw_callback_ms`.
+  The latter two measure CPU callback delivery delays, **not** the
+  panel's optical response or exact physical scanout latency.
+
+The old `MPV_DRM_STEREO_RECOVER=1` parity-toggle mechanism is bypassed
+in slot mode; it is still available on the older branch or with
+`MPV_DRM_STEREO_SLOT=0`. There is deliberately **no USB or emitter
+integration**.
+
+### Build and A/B test
+
+```sh
+git fetch origin
+git switch feature/drm-stereo-msc-queue
+meson compile -C build
+
+# Switch to a free TTY (no KWin holding DRM master).
+# Use the same half-SBS movie and unchanged DRM mode/audio.
+for depth in 3 4 5; do
+  MPV_DRM_STEREO_SBS=1 MPV_DRM_STEREO_SLOT=1 \
+    ./build/mpv --no-config --vo=gpu --gpu-context=drm \
+    --drm-connector=DP-1 --drm-mode=2560x1440@120 \
+    --drm-vrr-enabled=no --video-sync=display-resample \
+    --interpolation=no --hwdec=auto --swapchain-depth="$depth" \
+    "/path/to/half-sbs-video.mkv" \
+    >"/tmp/mpv-drm-stereo-slot-depth${depth}.log" 2>&1
+done
+```
+
+Each run should play for 90-120 seconds; press `q` to move to the
+next depth. For a clean baseline, also test
+`MPV_DRM_STEREO_SLOT=0 MPV_DRM_STEREO_RECOVER=1` with depth=3.
+
+Compare per-window `window_missed`, `window_wrong_eye`,
+`window_wrong_hold`, `window_target_misses`, and queue discard bursts,
+rather than relying on average refresh rate. Zero `target_misses` alone
+is not enough: stale page flips or missed hardware slots still make the
+stereo cadence unsafe for shutter glasses.
+
+### Known non-goals of this patch
+
+- It does not create a dedicated independent 120 Hz rendering thread.
+  Frame draws still come from mpv's display-resample scheduling, and
+  a stalled decoder or VO can still miss vblank deadlines.
+- It does not reserve a future hardware MSC atomically; a commit can
+  complete later than the predicted slot. Queue repair cannot guarantee
+  flawless L/R cadence.
+- Increasing swapchain depth may improve rendering slack but increases
+  pending-frame latency and can make phase recovery more expensive.
+  Keep it an explicit benchmark variable rather than assuming more
+  buffers are always better.
+- No physical 3D glasses/IR emitter should be enabled until measured
+  KMS cadence and optical shutter timing are both validated.
