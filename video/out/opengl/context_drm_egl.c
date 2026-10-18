@@ -76,6 +76,8 @@ struct egl {
 struct stereo_pair {
     struct gbm_bo *bo[2];
     uint64_t generation;
+    // CPU time when BOTH eye GBM front buffers were published as a pair.
+    int64_t ready_ns;
 };
 
 struct stereo_kms {
@@ -736,6 +738,17 @@ static void *stereo_kms_thread(void *arg)
                       drm->stereo_commit_after_callback_ns);
             drm->stereo_commit_draw_time_ns = 0;
             drm->stereo_pair_display_generation = s->active.generation;
+            drm->stereo_pair_first_eye_in_generation =
+                drm->stereo_pair_eye_last_submitted_generation[eye] !=
+                s->active.generation;
+            if (drm->stereo_pair_first_eye_in_generation)
+                drm->stereo_pair_eye_first_flips[eye]++;
+            drm->stereo_pair_eye_last_submitted_generation[eye] =
+                s->active.generation;
+            drm->stereo_pair_age_at_submit_ns =
+                s->active.ready_ns > 0 && submit_ns >= s->active.ready_ns
+                    ? submit_ns - s->active.ready_ns
+                    : -1;
             if (!promote)
                 drm->stereo_pair_repeated_flips++;
             drm->waiting_for_flip = true;
@@ -952,6 +965,7 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
         s->building.bo[eye] = bo;
         if (eye == 1 && s->building.bo[0] && s->building.bo[1]) {
             s->building.generation = ++s->next_generation;
+            s->building.ready_ns = mp_time_ns();
             if (!s->active.bo[0]) {
                 s->active = s->building;
             } else {
