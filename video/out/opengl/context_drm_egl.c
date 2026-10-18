@@ -21,6 +21,7 @@
 #include <signal.h>
 #include <string.h>
 #include <poll.h>
+#include <pthread.h>
 #include <unistd.h>
 
 #include <gbm.h>
@@ -66,6 +67,29 @@ struct egl {
     EGLDisplay display;
     EGLContext context;
     EGLSurface surface;
+    EGLConfig config;
+};
+
+struct stereo_pair {
+    struct gbm_bo *bo[2];
+    uint64_t generation;
+};
+
+struct stereo_kms {
+    bool enabled;
+    pthread_mutex_t mutex;
+    pthread_cond_t ready;
+    bool initialized, started, stop, first_flip_done;
+    pthread_t thread;
+
+    struct gbm_surface *right_gbm;
+    EGLSurface right_egl;
+    int capture_eye;
+    struct stereo_pair building;
+    struct stereo_pair active, pending;
+    struct stereo_pair retired[8];
+    unsigned num_retired;
+    uint64_t next_generation;
 };
 
 struct priv {
@@ -73,6 +97,7 @@ struct priv {
 
     struct egl egl;
     struct gbm gbm;
+    struct stereo_kms stereo;
 
     uint32_t gbm_format;
     uint64_t *gbm_modifiers;
@@ -207,6 +232,7 @@ static bool init_egl(struct ra_ctx *ctx)
                                  &config))
         return false;
 
+    p->egl.config = config;
     MP_VERBOSE(ctx, "Initializing EGL surface\n");
     p->egl.surface = mpegl_create_window_surface(
         p->egl.display, config, p->gbm.surface);
@@ -255,6 +281,41 @@ static bool init_gbm(struct ra_ctx *ctx)
         return false;
     }
     return true;
+}
+
+
+// Pair mode uses two separate EGL/GBM surfaces so the source renderer can
+// prepare an eye independently of the BO currently used by KMS. With a
+// single GBM surface, 2 pinned eye BOs + 2 staging BOs would exhaust Mesa's
+// 3-buffer surface. Each per-eye surface needs at most 3 BOs.
+static bool init_pair_surfaces(struct ra_ctx *ctx)
+{
+    struct priv *p = ctx->priv;
+    struct stereo_kms *s = &p->stereo;
+    if (!s->enabled)
+        return true;
+
+    if (p->num_gbm_modifiers) {
+        s->right_gbm = gbm_surface_create_with_modifiers(
+            p->gbm.device, p->draw_surface_size.width,
+            p->draw_surface_size.height, p->gbm_format,
+            p->gbm_modifiers, p->num_gbm_modifiers);
+    } else {
+        s->right_gbm = gbm_surface_create(
+            p->gbm.device, p->draw_surface_size.width,
+            p->draw_surface_size.height, p->gbm_format,
+            GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+    }
+    if (!s->right_gbm)
+        return false;
+
+    s->right_egl = mpegl_create_window_surface(
+        p->egl.display, p->egl.config, s->right_gbm);
+    if (s->right_egl == EGL_NO_SURFACE) {
+        s->right_egl = eglCreateWindowSurface(
+            p->egl.display, p->egl.config, s->right_gbm, NULL);
+    }
+    return s->right_egl != EGL_NO_SURFACE;
 }
 
 static void framebuffer_destroy_callback(struct gbm_bo *bo, void *data)
@@ -631,6 +692,19 @@ static bool drm_egl_init(struct ra_ctx *ctx)
         goto err;
 
     struct priv *p = ctx->priv = talloc_zero(ctx, struct priv);
+    const char *sbs = getenv("MPV_DRM_STEREO_SBS");
+    const char *pair = getenv("MPV_DRM_STEREO_PAIR");
+    p->stereo.enabled = sbs && pair &&
+        strcmp(sbs, "1") == 0 && strcmp(pair, "1") == 0;
+    p->stereo.capture_eye = -1;
+    if (p->stereo.enabled) {
+        if (pthread_mutex_init(&p->stereo.mutex, NULL) ||
+            pthread_cond_init(&p->stereo.ready, NULL)) {
+            MP_ERR(ctx, "Cannot initialize stereo KMS worker synchronization\n");
+            goto err;
+        }
+        p->stereo.initialized = true;
+    }
     p->drm_params.fd = -1;
     p->drm_params.render_fd = -1;
     struct vo_drm_state *drm = ctx->vo->drm;
@@ -693,6 +767,10 @@ static bool drm_egl_init(struct ra_ctx *ctx)
         MP_ERR(ctx->vo, "Failed to setup EGL.\n");
         goto err;
     }
+    if (!init_pair_surfaces(ctx)) {
+        MP_ERR(ctx->vo, "Failed creating second stereo EGL/GBM surface\n");
+        goto err;
+    }
 
     if (!eglMakeCurrent(p->egl.display, p->egl.surface, p->egl.surface,
                         p->egl.context)) {
@@ -751,6 +829,8 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     };
     if (!ra_gl_ctx_init(ctx, &p->gl, params))
         goto err;
+    if (p->stereo.enabled)
+        eglSwapInterval(p->egl.display, 0);
 
     ra_add_native_resource(ctx->ra, "drm_params_v2", &p->drm_params);
     ra_add_native_resource(ctx->ra, "drm_draw_surface_size", &p->draw_surface_size);
