@@ -233,6 +233,12 @@ struct vo_drm_state {
     uint64_t stereo_capture_generation;
     uint64_t stereo_pair_rendered;
     uint64_t stereo_pair_display_generation;
+    // Diagnostic of initial scanout for each eye in a prepared pair.
+    uint64_t stereo_pair_eye_last_submitted_generation[2];
+    uint64_t stereo_pair_eye_first_flips[2];
+    uint64_t stereo_pair_eye_first_misses[2];
+    bool stereo_pair_first_eye_in_generation;
+    int64_t stereo_pair_age_at_submit_ns;
     uint64_t stereo_pair_repeated_flips;
     uint64_t stereo_pair_update_skips;
 
