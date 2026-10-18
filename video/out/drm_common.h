@@ -191,6 +191,11 @@ struct vo_drm_state {
     uint64_t stereo_last_report_queue_discards;
     int64_t stereo_max_commit_callback_ns;
     int64_t stereo_max_draw_callback_ns;
+    // CPU-side turnaround between confirmed page-flip callback and the
+    // next atomic submit. This is not the kernel's hardware vblank time.
+    int64_t stereo_last_callback_cpu_ns;
+    int64_t stereo_commit_after_callback_ns;
+    int64_t stereo_max_submit_after_callback_ns;
 
     // Opt-in dual-surface producer / independent DRM vblank scanout.
     // Stereo pair operations are implemented by the drm EGL context.
