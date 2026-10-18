@@ -1019,6 +1019,11 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                 drm->stereo_max_gap = steps;
             if (steps > 1 && steps < 1000) {
                 drm->stereo_missed_slots += steps - 1;
+                if (drm->stereo_pair_mode && drm->stereo_flip_eye >= 0 &&
+                    drm->stereo_flip_eye < 2 &&
+                    drm->stereo_pair_first_eye_in_generation)
+                    drm->stereo_pair_eye_first_misses[drm->stereo_flip_eye] +=
+                        steps - 1;
                 // Scanout retained the previous eye for every skipped
                 // physical slot. Count mismatches against the absolute
                 // alternating-eye timeline.
@@ -1046,6 +1051,7 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                         "submit_after_callback_ms=%.3f "
                         "prev_callback_lag_ms=%.6f submit_after_ust_ms=%.6f "
                         "prev_lag_valid=%d submit_ust_valid=%d "
+                        "pair_gen=%llu first_eye=%d pair_age_ms=%.3f "
                         "atomic_ioctl_ms=%.3f commit_callback_ms=%.3f\n",
                         steps - 1, msc, drm->stereo_last_msc,
                         drm->stereo_last_eye ? "R" : "L",
@@ -1059,6 +1065,9 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                             : NAN,
                         drm->stereo_prev_callback_lag_valid,
                         drm->stereo_submit_after_ust_valid,
+                        (unsigned long long)drm->stereo_pair_display_generation,
+                        drm->stereo_pair_first_eye_in_generation,
+                        drm->stereo_pair_age_at_submit_ns / 1000000.0,
                         drm->stereo_commit_ioctl_ns / 1000000.0,
                         commit_callback_ms);
             }
@@ -1138,6 +1147,8 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     "min_submit_after_ust_ms=%.6f max_submit_after_ust_ms=%.3f "
                     "pair=%s pair_gen=%llu pair_renders=%llu "
                     "pair_reuse_flips=%llu pair_update_skips=%llu "
+                    "first_eye_L=%llu first_eye_R=%llu "
+                    "first_eye_L_misses=%llu first_eye_R_misses=%llu "
                     "legacy=%s legacy_flips=%llu legacy_fallbacks=%llu "
                     "pair_seq=%s pair_catchups=%llu "
                     "gpu_wait=%s gpu_waits=%llu max_gpu_wait_ms=%.3f "
@@ -1178,6 +1189,10 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     (unsigned long long)drm->stereo_pair_rendered,
                     (unsigned long long)drm->stereo_pair_repeated_flips,
                     (unsigned long long)drm->stereo_pair_update_skips,
+                    (unsigned long long)drm->stereo_pair_eye_first_flips[0],
+                    (unsigned long long)drm->stereo_pair_eye_first_flips[1],
+                    (unsigned long long)drm->stereo_pair_eye_first_misses[0],
+                    (unsigned long long)drm->stereo_pair_eye_first_misses[1],
                     drm->stereo_pair_legacy_mode ? "on" : "off",
                     (unsigned long long)drm->stereo_pair_legacy_flips,
                     (unsigned long long)drm->stereo_pair_legacy_fallbacks,
