@@ -812,3 +812,54 @@ the change in publication timing; repeat as needed.
 
 Compilation and runtime stability of this opt-in change have **not**
 been verified on the target hardware. Keep the USB IR emitter off.
+
+
+### Follow-up: GPU completion wait A/B with working RT priority
+
+Tested the optional producer-side `MPV_DRM_STEREO_GPU_WAIT=1` with
+`SEQ=1 RT=1`; compared to the previous `SEQ=1 RT=1 GPU_WAIT=0` run.
+
+| Metric | GPU_WAIT=0 | GPU_WAIT=1 |
+| --- | ---: | ---: |
+| Confirmed DRM flips | 11,640 | 13,080 |
+| Duration (120-flip windows) | ~97 s | ~109 s |
+| Missed vblank slots | 9 | 9 |
+| Misses per minute | 5.57 | 4.95 |
+| Wrong-eye flips | 9 | 9 |
+| Misses at L -> R | 7 | 6 |
+| Misses at R -> L | 2 | 3 |
+| Pair capture skips / atomic errors | 0 / 0 | 0 / 0 |
+| Terminal A-V | +6 ms | ~ -1 ms |
+| `gpu_waits` | n/a | 2615 |
+| Largest `max_gpu_wait_ms` among windows | n/a | 0.030 ms |
+
+The direction imbalance persists (6/9 L->R vs 7/9 in baseline)
+and the nine events in each run do not provide convincing evidence
+that the GPU completion wait has improved KMS reliability.
+`eglWaitClient()` usually returned within single-digit microseconds.
+Short wait duration is not proof that there was no GPU work at any
+point; the experiment merely did not expose significant waiting.
+Keep the opt-in GPU wait disabled for ordinary tests.
+
+During each missed vblank, the measured time from completion of the
+previous userspace DRM callback to initiation of the next atomic
+commit was ~0.03-0.12 ms; commit-to-callback stayed ~16.5-16.7 ms.
+Those observations do not distinguish time spent *inside* the atomic
+ioctl itself from time before the hardware latches the FB_ID.
+
+**New diagnostic:** measure the duration of the
+`drmModeAtomicCommit()` system call. Fields added:
+`max_atomic_ioctl_ms` to each 120-flip report and
+`atomic_ioctl_ms` to each individual `DRM SBS gap`.
+`commit_callback_ms` still measures from the ioctl entry to the
+userspace callback, so the remainder (minus event-handling latency)
+is driver scheduling/scanout rather than ioctl blocking.
+
+A useful next controlled comparison is `RT=1 GPU_WAIT=0`,
+first `SEQ=1` and then `SEQ=0`, holding video, KMS mode and
+all mpv arguments identical. `pair_catchups=0` throughout every
+SEQ=1 run so far, therefore the sequence ioctl has shown no
+corrective benefit for this workload and may add unnecessary overhead.
+
+This new instrumentation was not compiled or hardware-tested
+when committed. The emitter must remain disabled.
