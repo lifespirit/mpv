@@ -95,16 +95,12 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         struct mp_rect src, dst;
         struct mp_osd_res osd;
         vo_get_src_dst_rects(vo, &src, &dst, &osd);
-        // The experimental mode accepts *half* SBS with no 90/270-degree
-        // rotation. mpv's regular full-image aspect determines the output
-        // viewport, while the source region selects just one eye.
-        const int mid = src.x0 + (src.x1 - src.x0) / 2;
+        // The experimental mode accepts half SBS without 90/270-degree
+        // rotation. Keep mpv's regular full-image viewport and select
+        // the eye via a lightweight source crop. Critically, do NOT call
+        // gl_video_resize() every 8.33ms: that resets the GPU caches.
         const int eye = p->stereo_draw_count & 1;
-        if (eye == 0)
-            src.x1 = mid;
-        else
-            src.x0 = mid;
-        gl_video_resize(p->renderer, &src, &dst, &osd);
+        gl_video_set_sbs_eye(p->renderer, src, eye);
 #if HAVE_DRM
         vo->drm->stereo_draw_eye = eye;
         ++vo->drm->stereo_draws;
