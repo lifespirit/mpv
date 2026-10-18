@@ -1152,6 +1152,9 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     "legacy=%s legacy_flips=%llu legacy_fallbacks=%llu "
                     "pair_seq=%s pair_catchups=%llu "
                     "gpu_wait=%s gpu_waits=%llu max_gpu_wait_ms=%.3f "
+                    "native_fence=%s fence_checks=%llu fence_promotions=%llu "
+                    "fence_deferrals=%llu fence_unready_L=%llu "
+                    "fence_unready_R=%llu fence_errors=%llu "
                     "draws=%llu commit_errors=%llu msc=%u eye=%s "
                     "(video output only; USB disabled)\n",
                     (unsigned long long)drm->stereo_flips, shown_hz,
@@ -1201,6 +1204,13 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     drm->stereo_pair_gpu_wait ? "on" : "off",
                     (unsigned long long)drm->stereo_pair_gpu_waits,
                     drm->stereo_max_gpu_wait_ns / 1000000.0,
+                    drm->stereo_pair_native_fence ? "on" : "off",
+                    (unsigned long long)drm->stereo_pair_fence_checks,
+                    (unsigned long long)drm->stereo_pair_fence_promotions,
+                    (unsigned long long)drm->stereo_pair_fence_deferrals,
+                    (unsigned long long)drm->stereo_pair_fence_unready_eye[0],
+                    (unsigned long long)drm->stereo_pair_fence_unready_eye[1],
+                    (unsigned long long)drm->stereo_pair_fence_errors,
                     (unsigned long long)drm->stereo_draws,
                     (unsigned long long)drm->stereo_commit_errors, msc,
                     drm->stereo_flip_eye ? "R" : "L");
