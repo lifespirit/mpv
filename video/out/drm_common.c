@@ -987,6 +987,25 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
 
     int64_t ust = MP_TIME_S_TO_NS(sec) + MP_TIME_US_TO_NS(usec);
     if (drm->stereo_test_enabled && drm->stereo_flip_eye >= 0) {
+        // For DRM devices reporting MONOTONIC vblank UST, measure how
+        // far after the *physical scanout timestamp* this callback runs.
+        // Do not compare UST to mp_time_ns(), which uses an offset raw
+        // monotonic clock in mpv and has a different time origin.
+        if (drm->stereo_pair_mode && drm->stereo_ust_monotonic) {
+            struct timespec now;
+            if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
+                int64_t cpu_ns = (int64_t)now.tv_sec * 1000000000LL +
+                                 now.tv_nsec;
+                int64_t lag_ns = cpu_ns - ust;
+                if (lag_ns >= 0 && lag_ns < 1000000000LL) {
+                    drm->stereo_last_callback_lag_ns = lag_ns;
+                    drm->stereo_max_callback_lag_ns =
+                        MPMAX(drm->stereo_max_callback_lag_ns, lag_ns);
+                } else {
+                    drm->stereo_last_callback_lag_ns = -1;
+                }
+            }
+        }
         // This callback confirms a real KMS flip. The timestamp is NOT
         // the time when our draw_frame() callback was invoked.
         const uint64_t when_us = (uint64_t)sec * 1000000u + usec;
@@ -1021,11 +1040,14 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                 MP_WARN(drm, "DRM SBS gap: skipped=%u refreshes msc=%u "
                         "previous_msc=%u old_eye=%s incoming_eye=%s "
                         "submit_after_callback_ms=%.3f "
+                        "prev_callback_lag_ms=%.3f submit_after_ust_ms=%.3f "
                         "atomic_ioctl_ms=%.3f commit_callback_ms=%.3f\n",
                         steps - 1, msc, drm->stereo_last_msc,
                         drm->stereo_last_eye ? "R" : "L",
                         drm->stereo_flip_eye ? "R" : "L",
                         drm->stereo_commit_after_callback_ns / 1000000.0,
+                        drm->stereo_prev_callback_lag_ns / 1000000.0,
+                        drm->stereo_submit_after_ust_ns / 1000000.0,
                         drm->stereo_commit_ioctl_ns / 1000000.0,
                         commit_callback_ms);
             }
@@ -1100,6 +1122,8 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     "max_commit_callback_ms=%.3f max_draw_callback_ms=%.3f "
                     "max_submit_after_callback_ms=%.3f "
                     "max_atomic_ioctl_ms=%.3f "
+                    "ust_monotonic=%s max_callback_lag_ms=%.3f "
+                    "max_submit_after_ust_ms=%.3f "
                     "pair=%s pair_gen=%llu pair_renders=%llu "
                     "pair_reuse_flips=%llu pair_update_skips=%llu "
                     "legacy=%s legacy_flips=%llu legacy_fallbacks=%llu "
@@ -1131,6 +1155,9 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     drm->stereo_max_draw_callback_ns / 1000000.0,
                     drm->stereo_max_submit_after_callback_ns / 1000000.0,
                     drm->stereo_max_commit_ioctl_ns / 1000000.0,
+                    drm->stereo_ust_monotonic ? "on" : "off",
+                    drm->stereo_max_callback_lag_ns / 1000000.0,
+                    drm->stereo_max_submit_after_ust_ns / 1000000.0,
                     drm->stereo_pair_mode ? "on" : "off",
                     (unsigned long long)drm->stereo_pair_display_generation,
                     (unsigned long long)drm->stereo_pair_rendered,
@@ -1158,6 +1185,8 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
             drm->stereo_max_draw_callback_ns = 0;
             drm->stereo_max_submit_after_callback_ns = 0;
             drm->stereo_max_commit_ioctl_ns = 0;
+            drm->stereo_max_callback_lag_ns = 0;
+            drm->stereo_max_submit_after_ust_ns = 0;
             drm->stereo_max_gpu_wait_ns = 0;
             drm->stereo_queue_peak = 0;
             drm->stereo_max_gap = 0;
