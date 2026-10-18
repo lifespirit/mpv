@@ -1103,3 +1103,41 @@ rendering timing. Preserve the known working atomic path and
 
 The new startup GPU identification logs have not been compiled or
 verified on the user's system yet.
+
+
+### Ninth run: active i915 KMS + Intel Mesa renderer confirmed
+
+The user resolved `/sys/class/drm/card1-DP-1`:
+`status=connected`, PCI device `0000:00:02.0`,
+driver `/sys/bus/pci/drivers/i915`. The new mpv startup messages
+independently confirmed `node=/dev/dri/card1 driver=i915 version=1.6.0`
+and `vendor=Intel renderer=Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2)`.
+The NVIDIA MX450 is not used for the current KMS or GL rendering.
+
+This uploaded log covers only ~5 seconds / 600 confirmed flips
+(not a full 2-minute sample). It contains two one-vblank misses,
+both **L -> R** with quick atomic ioctls:
+- MSC 3285450, previous 3285448: callback->submit 0.013 ms,
+  submit-after-UST -0.389267 ms, ioctl 0.090 ms,
+  submit->callback 16.762 ms;
+- MSC 3285956, previous 3285954: callback->submit 0.015 ms,
+  submit-after-UST -0.395587 ms, ioctl 0.099 ms,
+  submit->callback 16.730 ms.
+
+Both phase samples have explicit validity flags set. The KMS thread
+was already at SCHED_FIFO(10); no atomic commit errors or dropped
+stereo pair updates were reported through the 600-flip report.
+Thus quick application submission does not consistently guarantee
+a following-vblank callback on this Intel i915 host.
+
+Do not read the negative monotonic-vs-UST phase as evidence of
+late userspace events: DRM timestamps target the end of vblank,
+which may still be in the future when the flip event is delivered
+inside vblank. Next diagnostic step should capture available
+`drm:drm_vblank_event*`, i915 `intel_pipe_update_*`,
+and any `dma_fence` tracepoints during a 90-120 second run.
+Check which tracepoints exist on the **installed kernel** before
+selecting them; do not assume old i915 tracepoint names exist.
+
+See Linux DRM `get_vblank_timestamp` contract and i915 tracepoint
+descriptions for the kernel used during investigation.
