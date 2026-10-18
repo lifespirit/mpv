@@ -365,3 +365,75 @@ Rebuild and test depth=3 for 90-120 seconds first. Only if that
 sustains near 120 fps should depth=4 and 5 be tested. Monitor both
 `peak_pending` and the L/R correctness metrics; a higher queue
 depth does not itself guarantee phase correctness.
+
+### Sixth test: asynchronous MSC-slot v2 A/B across depth 3, 4 and 5
+
+After restoring the original pipelined GBM pressure loop (and adding
+`peak_pending`), three runs used the same 23.976 fps Half-SBS film
+with VA-API decoding, 2560x1440 at ~119.998 Hz, audio via PipeWire,
+`MPV_DRM_STEREO_SBS=1`, `MPV_DRM_STEREO_SLOT=1`,
+`--video-sync=display-resample`, `--interpolation=no`,
+and USB emitter **disconnected**.
+
+| Metric | Depth 3 | Depth 4 | Depth 5 |
+| --- | ---: | ---: | ---: |
+| Report windows (120 flips each) | 92 | 95 | 95 |
+| Confirmed KMS flips | 11,040 | 11,400 | 11,400 |
+| Cumulative shown_hz | 119.859 | 119.902 | 119.932 |
+| Missed vblanks | 13 | 9 | 6 |
+| Confirmed wrong-eye flips | 7 | 7 | 4 |
+| Wrong-eye held physical slots | 9 | 8 | 4 |
+| Adjacent parity errors | 12 | 14 | 6 |
+| Predicted target MSC misses | 11 | 10 | 5 |
+| Waiting GBM BOs discarded | 7 | 7 | 4 |
+| Maximum observed pending BOs | 2 | 2 | 2 |
+| Atomic commit errors | 0 | 0 | 0 |
+| Clean 120-flip windows (all stereo diagnostics zero) | 87 / 92 | 92 / 95 | 92 / 95 |
+| Longest continuous span of clean windows | 73 | 60 | 38 |
+
+Windows with physical missed slots:
+
+- Depth 3: windows #1 (6), #8 (2), #82 (1), #83 (3), #91 (1).
+- Depth 4: windows #1 (2), #9 (3), #35 (4).
+- Depth 5: windows #1 (2), #40 (3), #74 (1).
+
+The pipeline is back to near-120 flip cadence; the previous forced-flip
+regression is fixed. Between isolated missed vblanks, the MSC-slot
+algorithm keeps the phase correct for long stretches. The remaining
+confirmed wrong-eye flips are localized to skip bursts, and
+`window_discards` rises alongside recovery, showing that the pending
+queue is repairing phase without sustained inversion.
+
+All three queue-depth settings recorded **peak_pending=2** for every
+window, so raising `--swapchain-depth` beyond 3 did not demonstrably
+increase the physical GBM queue depth. Depth=5 showed the fewest misses
+in this sample, but is **not proven** superior: tests started at
+different times and encountered different transient scheduling jitter.
+
+In clean windows, `max_commit_callback_ms` is typically ~8.4-8.6 ms
+(one 120 Hz refresh). During skip bursts, it rises to ~13-18 ms
+and sometimes more; `max_draw_callback_ms` is ~25 ms in clean
+windows (including pre-rendering queue latency) and rises to ~33-39 ms
+during faults. The current counters combine hardware scanout wait
+and callback-delivery scheduling, so these observations **do not
+conclusively identify** which portion caused each missed deadline.
+
+**Architectural recommendation:** stop doing a full GL SBS-eye draw
+for every 120 Hz output refresh. Decode each new 23.976 fps source
+frame, generate/cache **both** already-expanded L/R images, and
+drive KMS plane FB_ID swaps using the actual (MSC, UST) vblank clock.
+The scanout cycle must keep running on the previous stereo pair
+when video decoding or GL rendering is delayed. The producer can
+replace the eye pair only at a safe frame boundary, with no KMS
+FB_ID pointing at a released BO; distinguish in-flight, scanned-out,
+and update-staging buffers. A persistent MSC parity defines which
+eye to commit, including when a physical slot is skipped; do not
+choose the eye from render/draw count.
+
+A rigorous next implementation should include a producer/consumer
+contract, explicit BO lifetime management, a KMS-driven independent
+flip loop, and per-flip logs for intended MSC, confirmed MSC and
+render-pair generation ID. The monitor's `119.998 Hz` is not
+`120.000 Hz` and should also be the eventual timing reference for
+the USB/IR emitter. **No new independent scheduler is implemented
+yet; this is a design note based on the experimental runs.**
