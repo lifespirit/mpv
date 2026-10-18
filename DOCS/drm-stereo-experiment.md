@@ -443,7 +443,7 @@ yet; this is a design note based on the experimental runs.**
 Branch: `feature/drm-stereo-dual-scanout` (the v2 branch is untouched).
 
 This is an **experimental, unvalidated architecture**. Its source has not
-yet been compiled/run on the target Arch/AMD DRM system. USB emitter
+yet been compiled/run on the target Arch Linux DRM system. USB emitter
 support remains **disabled**.
 
 Enable with `MPV_DRM_STEREO_SBS=1 MPV_DRM_STEREO_PAIR=1`.
@@ -538,7 +538,7 @@ No physical stereo accuracy has been demonstrated yet.
 
 ### First paired KMS smoke-test failure: no scanout
 
-The first `MPV_DRM_STEREO_PAIR=1` test on the user's AMD/Arch
+The first `MPV_DRM_STEREO_PAIR=1` test on the user's Arch Linux
 hardware started VA-API video and PipeWire audio but showed a black
 screen and repeatedly logged:
 
@@ -568,7 +568,7 @@ endless busy retries. This fix still needs hardware validation.
 
 ### Second paired KMS smoke test: 120 Hz scanout, runaway playback speed
 
-After fixing the atomic-property bug, the AMD/KMS worker **did**
+After fixing the atomic-property bug, the dedicated KMS worker **did**
 produce picture, with confirmed KMS flip rate 119.997 Hz, zero
 missed slots, zero wrong-eye flips and zero wrong holds over at
 least 1,680 flips. However video advanced roughly 7-10x faster
@@ -668,7 +668,7 @@ testing may need optional SCHED_FIFO for the isolated KMS thread
 that before establishing the new timing histogram.
 
 **Validation**: new commits were not locally compiled or tested on
-the AMD/KMS host. First run a short test with `MPV_DRM_STEREO_SEQ=1`
+the target KMS host. First run a short test with `MPV_DRM_STEREO_SEQ=1`
 to confirm the new query succeeds and `target_misses` are populated.
 Then compare 90-120 second runs with `SEQ=0` and `SEQ=1`, keeping
 the exact same video and mpv configuration. Both must continue
@@ -740,7 +740,7 @@ KMS behavior of these new commits still require user-side validation.
 
 ### Paired KMS A/B: RT=0 versus SCHED_FIFO(10)
 
-Two ~1.5 minute runs with `MPV_DRM_STEREO_SEQ=1` on the AMD
+Two ~1.5 minute runs with `MPV_DRM_STEREO_SEQ=1` on the target
 DRM/GBM/EGL host:
 
 | Metric | RT=0 | RT=1 |
@@ -992,12 +992,12 @@ If per-gap `submit_after_ust_ms` is near or above the 8.333 ms
 scanout period, the previous kernel event arrived too late for
 a next-vblank flip (assuming the supplied event UST corresponds to
 the previous vblank). If the value is small, investigation should
-move to kernel-side DRM/AMDGPU flip scheduling, implicit fences,
+move to kernel-side DRM/KMS flip scheduling, implicit fences,
 and display core. Do not infer an exact presentation-deadline
 threshold from 8.333 ms alone; the hardware cutoff may be earlier.
 
 These instrumentation commits are not yet compiled or tested on
-the actual Linux DRM/AMDGPU host.
+the actual Linux DRM host.
 
 
 ### Seventh run: signed DRM UST measurements (phase instrumentation bug)
@@ -1044,9 +1044,62 @@ of the userspace CPU monotonic time; positive but large means actual
 late callback, and both indicate a different path than ordinary
 immediate next-vblank flip submission. Kernel DRM helpers document
 that page-flip event MSC/UST are obtained from the KMS vblank
-timestamping machinery; AMD DC's pageflip handler has a specific
-path updating vblank count and timestamp before publishing events.
+timestamping machinery; The underlying DRM driver may deliver events during vblank, and its
+UST may describe the *future end* of that vblank interval.
 The exact reason on this GPU and kernel remains undetermined.
 
 This change only modifies metrics, not scanout selection or timing.
 It has not been compiled or tested on the target GPU.
+
+
+### Eighth run and GPU identity correction: Intel Tiger Lake Iris Xe
+
+The user corrected the hardware identification. The **test laptop** has:
+- `0000:00:02.0` Intel TigerLake-LP GT2 [Iris Xe Graphics];
+- `0000:5a:00.0` NVIDIA TU117M [GeForce MX450].
+
+Earlier entries referring to an `AMD` video card/AMDGPU were
+incorrect assumptions. The DRM/KMS GPU for DP-1 is *likely* Intel,
+but neither the existing `lspci` output nor an mpv `vaapi` message
+proves which PCI device backs the selected DRM/KMS fd and which
+device renders the EGL context. New diagnostics at startup print
+`Stereo DRM/KMS: node=... driver=... version=...` via
+`drmGetVersion(drm->fd)`, and
+`Stereo EGL/GL: vendor=... renderer=...` via GL GetString,
+after the EGL context is current. These should be checked before
+attributing hardware-specific behavior to i915 or nvidia-drm.
+
+The latest 112 s run (`RT=1 SEQ=0 GPU_WAIT=0 LEGACY=0`) had
+13,440 confirmed flips, 7 one-refresh vblank misses (5 L->R,
+2 R->L), 0 failed commits and 0 skipped pair updates. The active
+atomic ioctl on every missed flip completed in 0.096-0.122 ms;
+callback delivery followed about 16.56-16.76 ms after submission.
+End A-V was ~-1 ms. So none of the seven misses requires a
+slow synchronous ioctl.
+
+The corrected UST measurements show *13,327 negative callback
+lags out of 13,440 flips* (~99.2%); on seven misses, the previous
+UST minus userspace callback showed -0.233 to -0.380 ms, and
+the next submit also preceded that event's nominal UST by
+0.214 to 0.367 ms. Negative lags are therefore not specific
+to the failures. The Linux DRM specification for
+`get_vblank_timestamp` explicitly states that it targets the
+**end** of vblank / first active scanline and can be in the
+future when queried **inside** vblank. The earlier belief that
+negative UST callback age was necessarily a bug is incorrect.
+It is consistent with this driver reporting the end-of-vblank
+timestamp while sending its event earlier in vblank. This
+explanation is plausible, not by itself proof of the exact
+hardware IRQ and flip deadline.
+
+Investigating the remaining misses should target the active
+Intel `i915` KMS path (once driver logging confirms it),
+especially page-flip completion/commit workers, synchronization
+fences and real vblank versus event delivery, rather than
+AMDGPU DCN. Kernel ftrace DRM/i915 events and dynamic-debug
+are more promising next than repeatedly altering the L/R
+rendering timing. Preserve the known working atomic path and
+`SCHED_FIFO(10)`.
+
+The new startup GPU identification logs have not been compiled or
+verified on the user's system yet.
