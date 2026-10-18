@@ -78,6 +78,8 @@ struct stereo_pair {
     // Exported EGL_ANDROID_native_fence_sync descriptors for the two eyes.
     // Zero means absent: exported fds are moved above stderr if necessary.
     int fence_fd[2];
+    // Number of L-boundary attempts with unsignaled GPU work.
+    unsigned fence_deferrals;
     uint64_t generation;
     // CPU time when BOTH eye GBM front buffers were published as a pair.
     int64_t ready_ns;
@@ -600,6 +602,50 @@ static int stereo_export_native_fence(struct ra_ctx *ctx)
     return fd;
 }
 
+// One-shot FD status probe for rare producer-side pending-discard logs.
+static int stereo_debug_fence_ready(int fd)
+{
+    if (fd <= 0)
+        return -1;
+    struct pollfd pfd = {.fd = fd, .events = POLLIN};
+    int rc = poll(&pfd, 1, 0);
+    if (rc < 0 || (rc == 1 && (pfd.revents & (POLLERR | POLLNVAL))))
+        return -1;
+    return rc == 1 && (pfd.revents & POLLIN) ? 1 : 0;
+}
+
+// Called on the GL producer thread with stereo.mutex held, immediately
+// before a pending pair that never reached KMS is discarded.
+// First 40 events are logged; thereafter one in 100 to avoid log storms.
+static void stereo_note_unpresented_pair(struct ra_ctx *ctx,
+                                         const char *reason)
+{
+    struct priv *p = ctx->priv;
+    struct stereo_kms *s = &p->stereo;
+    struct vo_drm_state *drm = ctx->vo->drm;
+    const struct stereo_pair *pair = &s->pending;
+    uint64_t count = ++drm->stereo_pair_unpresented_discards;
+    if (count > 40 && count % 100 != 0)
+        return;
+
+    int64_t now_ns = mp_time_ns();
+    double age_ms = pair->ready_ns > 0
+        ? (now_ns - pair->ready_ns) / 1000000.0 : -1.0;
+    int left = s->native_fence
+        ? stereo_debug_fence_ready(pair->fence_fd[0]) : -1;
+    int right = s->native_fence
+        ? stereo_debug_fence_ready(pair->fence_fd[1]) : -1;
+    MP_INFO(ctx, "Stereo unpresented pair discarded: "
+            "reason=%s count=%llu pending_gen=%llu active_gen=%llu "
+            "pending_age_ms=%.3f fence_L=%d fence_R=%d "
+            "left_boundary_fence_deferrals=%u "
+            "(fence: 1=signaled 0=unsignaled -1=unavailable)\n",
+            reason, (unsigned long long)count,
+            (unsigned long long)pair->generation,
+            (unsigned long long)s->active.generation,
+            age_ms, left, right, pair->fence_deferrals);
+}
+
 // Zero-timeout poll of both eyes on the RT worker. No EGL/GL operations
 // and no waits on GPU completion are ever performed on this thread.
 static bool stereo_pair_fences_signaled(struct vo_drm_state *drm,
@@ -745,8 +791,10 @@ static void *stereo_kms_thread(void *arg)
         if (eligible && s->native_fence) {
             drm->stereo_pair_fence_checks++;
             fences_ready = stereo_pair_fences_signaled(drm, &s->pending);
-            if (!fences_ready)
+            if (!fences_ready) {
                 drm->stereo_pair_fence_deferrals++;
+                s->pending.fence_deferrals++;
+            }
         }
         bool promote = eligible && fences_ready;
         struct stereo_pair *selected = promote ? &s->pending : &s->active;
@@ -1008,7 +1056,7 @@ bool vo_drm_stereo_pair_can_capture(struct ra_ctx *ctx)
         if ((!gbm_surface_has_free_buffers(p->gbm.surface) ||
              !gbm_surface_has_free_buffers(s->right_gbm)) &&
             s->pending.bo[0]) {
-            ctx->vo->drm->stereo_pair_unpresented_discards++;
+            stereo_note_unpresented_pair(ctx, "gbm_pressure");
             stereo_release_pair(p, &s->pending);
         }
         available = gbm_surface_has_free_buffers(p->gbm.surface) &&
@@ -1135,7 +1183,7 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
                 // Superseded staging pairs were never submitted to KMS.
                 // Do not release active or in-flight BOs here.
                 if (s->pending.bo[0]) {
-                    drm->stereo_pair_unpresented_discards++;
+                    stereo_note_unpresented_pair(ctx, "newer_generation");
                     stereo_release_pair(p, &s->pending);
                 }
                 s->pending = s->building;
