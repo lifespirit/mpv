@@ -82,6 +82,7 @@ struct stereo_kms {
     bool enabled;
     bool sequence_mode;
     bool rt_mode;
+    bool gpu_wait;
     pthread_mutex_t mutex;
     pthread_cond_t ready;
     pthread_cond_t flip_ready;
@@ -839,6 +840,25 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
             MP_ERR(ctx, "EGL stereo eye %d swap failed\n", eye);
             return;
         }
+        if (eye == 1 && s->gpu_wait) {
+            // EGL swap queues GPU work, but the BO can still be busy when
+            // atomic KMS tries to scan it out. Experimentally wait for
+            // both eyes to finish before making the complete pair public.
+            // This executes on the 24 fps GL producer thread, never the
+            // 120 Hz independent KMS worker.
+            int64_t begin_ns = mp_time_ns();
+            if (!eglWaitClient()) {
+                MP_ERR(ctx, "Stereo GPU completion wait failed: EGL error %#x\n",
+                       eglGetError());
+                return;
+            }
+            int64_t waited_ns = mp_time_ns() - begin_ns;
+            pthread_mutex_lock(&s->mutex);
+            drm->stereo_pair_gpu_waits++;
+            drm->stereo_max_gpu_wait_ns =
+                MPMAX(drm->stereo_max_gpu_wait_ns, waited_ns);
+            pthread_mutex_unlock(&s->mutex);
+        }
         struct gbm_bo *bo = gbm_surface_lock_front_buffer(surface);
         if (!bo) {
             MP_ERR(ctx, "Could not lock stereo eye %d GBM front buffer\n", eye);
@@ -1142,7 +1162,14 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     const char *rt = getenv("MPV_DRM_STEREO_RT");
     p->stereo.rt_mode = p->stereo.enabled && rt &&
                         strcmp(rt, "1") == 0;
+    const char *gpu_wait = getenv("MPV_DRM_STEREO_GPU_WAIT");
+    p->stereo.gpu_wait = p->stereo.enabled && gpu_wait &&
+                         strcmp(gpu_wait, "1") == 0;
     drm->stereo_pair_sequence_mode = p->stereo.sequence_mode;
+    drm->stereo_pair_gpu_wait = p->stereo.gpu_wait;
+    if (p->stereo.gpu_wait)
+        MP_INFO(ctx, "Stereo paired GPU completion wait enabled "
+                "(eglWaitClient after right-eye EGL swap)\n");
     p->stereo.capture_eye = -1;
     if (p->stereo.enabled) {
         int err = pthread_mutex_init(&p->stereo.mutex, NULL);
