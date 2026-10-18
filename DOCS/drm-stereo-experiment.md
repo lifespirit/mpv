@@ -929,3 +929,72 @@ direction distribution, A-V stability and max_atomic_ioctl_ms.
 Do not interpret a fallback run as having tested legacy scanout.
 The change is **not compiled or runtime verified on the user's
 GPU**; retain the working atomic path and keep USB disabled.
+
+
+### Sixth run: legacy page-flip versus atomic (same RT/SEQ settings)
+
+The `MPV_DRM_STEREO_LEGACY=1` run completed ~110 seconds with
+`RT=1 SEQ=0 GPU_WAIT=0`. The log confirmed the first successful
+legacy flip and `legacy=on legacy_flips=13200 legacy_fallbacks=0`:
+**the fallback atomic path was not used**.
+
+| Metric | Atomic | Legacy |
+| --- | ---: | ---: |
+| KMS flips | 13,560 | 13,200 |
+| Duration | ~113 s | ~110 s |
+| Missed physical slots | 9 | 14 |
+| Misses/min | 4.78 | 7.64 |
+| L -> R misses | 9 | 9 |
+| R -> L misses | 0 | 5 |
+| Commit failures | 0 | 0 |
+| Pair-update skips | 0 | 0 |
+| Final A-V | +7 ms | +19 ms |
+
+All 14 missed legacy flips had a quick ioctl: 0.043-0.121 ms,
+but confirmation happened about 16.6-16.8 ms after submit,
+two 120-Hz periods instead of one. The legacy mode did not
+eliminate the issue; one A/B sample does not prove that it is
+intrinsically less reliable. Both interface paths may ultimately
+be serviced by related KMS commit / plane-update machinery.
+
+### New phase measurement: event delivery lag vs physical vblank
+
+A key missing value is the phase at which mpv receives its
+previous page-flip callback. The KMS worker can issue the next
+ioctl immediately after callback, but if that callback reaches
+userspace late in the refresh period, a fast ioctl may still miss
+the next vblank deadline.
+
+DRM event UST uses `CLOCK_MONOTONIC` when
+`DRM_CAP_TIMESTAMP_MONOTONIC` is true. This is checked once
+on the opened DRM fd; no UST age is calculated if unsupported.
+The new diagnostic measures CPU-side `CLOCK_MONOTONIC` at the
+start of the DRM callback and immediately before the flip ioctl;
+it does **not** mix this clock with mpv's offset raw clock.
+
+New fields on every `DRM SBS gap`:
+- `prev_callback_lag_ms`: previous DRM event's callback delivery
+  time minus its physical UST, before the current flip was sent;
+- `submit_after_ust_ms`: elapsed time since previous physical
+  UST until the new flip ioctl, including event-delivery lag and
+  userspace work;
+- existing `submit_after_callback_ms`,
+  `atomic_ioctl_ms`, `commit_callback_ms` remain available.
+
+Per-120-flip reports additionally show `ust_monotonic=on/off`,
+`max_callback_lag_ms`, `max_submit_after_ust_ms`.
+The per-gap values are -1.000 ms if no valid monotonic phase
+measurement is available.
+
+Run the default **atomic** path:
+`RT=1 SEQ=0 GPU_WAIT=0 LEGACY=0`.
+If per-gap `submit_after_ust_ms` is near or above the 8.333 ms
+scanout period, the previous kernel event arrived too late for
+a next-vblank flip (assuming the supplied event UST corresponds to
+the previous vblank). If the value is small, investigation should
+move to kernel-side DRM/AMDGPU flip scheduling, implicit fences,
+and display core. Do not infer an exact presentation-deadline
+threshold from 8.333 ms alone; the hardware cutoff may be earlier.
+
+These instrumentation commits are not yet compiled or tested on
+the actual Linux DRM/AMDGPU host.
