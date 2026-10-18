@@ -1441,3 +1441,56 @@ assuming adjacent 120Hz flips; this need not be the
 actual rendering-completion-to-photon delay. If
 failures return at 12ms, repeat 16ms and consider 14ms
 to bound the useful range. Keep 16ms as tested fallback.
+
+
+### Fifteenth run: 12ms age gate fails in four consecutive right-eye first flips
+
+The log `mpv-drm-stereo-pair-depth3-rt-1(20261018-211629).log`
+used `MIN_PAIR_AGE_MS=12` and `FREEZE_PAIR=0` on Intel
+i915 / Mesa TGL GT2 at 119.998 Hz. There were 100 full
+120-flip report windows: 12,000 confirmed KMS flips (~100.03s),
+four single-refresh gaps, and no DRM commit errors or
+pair-update skips. Final `window_hz=119.996`,
+`shown_hz=119.956`, `missed_vblanks=4`,
+`parity_errors=8`, `wrong_eye=4`, `wrong_hold=4`.
+Continuous rendering/promotion continued:
+`pair_gen=2398`, `pair_renders=2399`,
+`draws=4798`, `first_eye_L=2398`,
+`first_eye_R=2398`; `first_eye_R_misses=4`
+and `first_eye_L_misses=0`.
+
+The FOUR gaps all occurred as a compact burst:
+- MSC 4276916->4276918, generation 882, first R use,
+  pair_age=23.395ms, callback->submit=0.015ms,
+  ioctl=0.108ms, commit->callback=16.843ms;
+- MSC 4276922->4276924, generation 883, first R use,
+  pair_age=23.563ms, callback->submit=0.011ms,
+  ioctl=0.103ms, commit->callback=16.566ms;
+- MSC 4276928->4276930, generation 884, first R use,
+  pair_age=23.566ms, callback->submit=0.025ms,
+  ioctl=0.128ms, commit->callback=16.533ms;
+- MSC 4276934->4276936, generation 885, first R use,
+  pair_age=23.594ms, callback->submit=0.016ms,
+  ioctl=0.102ms, commit->callback=16.582ms.
+
+The reported MSCs differ by 6 each (~50ms per successive
+miss), with the four misses spanning ~150ms from the first
+to last; the burst occurs ~36s into scanout. The rest of
+the capture (~63s) shows no additional misses. The flip
+events were *late*, not rejected. No clear user-thread
+commit/submit slowdown preceded the burst.
+
+The age of the pair at right-eye submit was ~23.4–23.6ms,
+not merely the 12ms left-eye promotion gate. By contrast,
+the 16ms and 25ms gated tests both had zero misses for
+~110–116s. This empirically suggests a narrow useful
+threshold between 12 and 16ms under this workload; it does
+NOT demonstrate that 16ms is a real-time guarantee or
+settle GPU fence root cause.
+
+Next check `MIN_PAIR_AGE_MS=14` for ~120s with otherwise
+identical settings, then perform longer repeated trials
+at 16ms (e.g. >=10 minutes, ideally with varied scenes
+and system load) before considering 16ms a reliable
+operational setting. Leave the KMS worker and atomic code
+unchanged until threshold/reproducibility is characterized.
