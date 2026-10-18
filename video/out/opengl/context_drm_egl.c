@@ -23,6 +23,7 @@
 #include <string.h>
 #include <poll.h>
 #include <pthread.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <gbm.h>
@@ -80,6 +81,9 @@ struct stereo_kms {
     bool enabled;
     pthread_mutex_t mutex;
     pthread_cond_t ready;
+    pthread_cond_t flip_ready;
+    uint64_t confirmed_flips;
+    uint64_t vo_seen_flips;
     bool initialized, started, stop, first_flip_done;
     pthread_t thread;
 
@@ -634,6 +638,11 @@ static void *stereo_kms_thread(void *arg)
                 if (drmHandleEvent(drm->fd, &drm->ev) < 0) {
                     MP_ERR(ctx, "Stereo DRM event processing failed\n");
                     s->stop = true;
+                } else if (!drm->waiting_for_flip) {
+                    // Callback confirmed a physical page flip. Inform the
+                    // mpv VO pacing loop without making scanout wait on it.
+                    s->confirmed_flips = drm->stereo_flips;
+                    pthread_cond_broadcast(&s->flip_ready);
                 }
             } else if (n < 0 && errno != EINTR) {
                 MP_ERR(ctx, "Stereo DRM poll failed: %s\n",
@@ -659,6 +668,41 @@ static void *stereo_kms_thread(void *arg)
         }
     }
     return NULL;
+}
+
+// Called once by the mpv VO thread for each display-synced flip_page.
+// A standalone KMS worker continues alternating L/R every vblank, but
+// mpv's own frame scheduler MUST still be paced by those hardware events.
+// Otherwise the core assumes implicit blocking was performed by the VO
+// and advances the 23.976 fps movie as fast as decoding allows.
+void vo_drm_stereo_pair_wait_vsync(struct ra_ctx *ctx)
+{
+    struct priv *p = ctx->priv;
+    struct stereo_kms *s = &p->stereo;
+    if (!s->enabled || !s->initialized)
+        return;
+
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_nsec += 100000000; // 100 ms: never hang mpv on a lost KMS event
+    if (deadline.tv_nsec >= 1000000000) {
+        deadline.tv_nsec -= 1000000000;
+        deadline.tv_sec++;
+    }
+
+    pthread_mutex_lock(&s->mutex);
+    while (!s->stop && s->confirmed_flips <= s->vo_seen_flips) {
+        int ret = pthread_cond_timedwait(&s->flip_ready, &s->mutex, &deadline);
+        if (ret == ETIMEDOUT)
+            break;
+        if (ret != 0) {
+            MP_ERR(ctx, "Stereo VO vblank wait failed: %d\n", ret);
+            break;
+        }
+    }
+    if (s->confirmed_flips > s->vo_seen_flips)
+        s->vo_seen_flips = s->confirmed_flips;
+    pthread_mutex_unlock(&s->mutex);
 }
 
 // These helpers are only invoked on the original VO/EGL thread.
@@ -831,6 +875,7 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
         pthread_mutex_lock(&s->mutex);
         s->stop = true;
         pthread_cond_broadcast(&s->ready);
+        pthread_cond_broadcast(&s->flip_ready);
         pthread_mutex_unlock(&s->mutex);
         if (s->started)
             pthread_join(s->thread, NULL);
@@ -852,6 +897,7 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
             for (unsigned i = 0; i < s->num_retired; i++)
                 stereo_release_pair(p, &s->retired[i]);
             s->num_retired = 0;
+            pthread_cond_destroy(&s->flip_ready);
             pthread_cond_destroy(&s->ready);
             pthread_mutex_destroy(&s->mutex);
         }
@@ -1025,9 +1071,22 @@ static bool drm_egl_init(struct ra_ctx *ctx)
         strcmp(sbs, "1") == 0 && strcmp(pair, "1") == 0;
     p->stereo.capture_eye = -1;
     if (p->stereo.enabled) {
-        if (pthread_mutex_init(&p->stereo.mutex, NULL) ||
-            pthread_cond_init(&p->stereo.ready, NULL)) {
-            MP_ERR(ctx, "Cannot initialize stereo KMS worker synchronization\n");
+        int err = pthread_mutex_init(&p->stereo.mutex, NULL);
+        if (err) {
+            MP_ERR(ctx, "Cannot initialize stereo KMS mutex: %d\n", err);
+            goto err;
+        }
+        err = pthread_cond_init(&p->stereo.ready, NULL);
+        if (err) {
+            MP_ERR(ctx, "Cannot initialize stereo KMS ready event: %d\n", err);
+            pthread_mutex_destroy(&p->stereo.mutex);
+            goto err;
+        }
+        err = pthread_cond_init(&p->stereo.flip_ready, NULL);
+        if (err) {
+            MP_ERR(ctx, "Cannot initialize stereo KMS flip event: %d\n", err);
+            pthread_cond_destroy(&p->stereo.ready);
+            pthread_mutex_destroy(&p->stereo.mutex);
             goto err;
         }
         p->stereo.initialized = true;
