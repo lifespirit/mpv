@@ -98,7 +98,11 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         // rotation. Keep mpv's regular full-image viewport and select
         // the eye via a lightweight source crop. Critically, do NOT call
         // gl_video_resize() every 8.33ms: that resets the GPU caches.
-        const int eye = p->stereo_draw_count & 1;
+        int eye = p->stereo_draw_count & 1;
+#if HAVE_DRM
+        if (vo->drm->stereo_recover)
+            eye ^= vo->drm->stereo_phase_correction;
+#endif
         gl_video_set_sbs_eye(p->renderer, p->stereo_full_src, eye);
 #if HAVE_DRM
         vo->drm->stereo_draw_eye = eye;
@@ -369,7 +373,11 @@ static int preinit(struct vo *vo)
         vo->drm->stereo_draw_eye = -1;
         vo->drm->stereo_flip_eye = -1;
         vo->drm->stereo_last_eye = -1;
-        MP_INFO(vo, "Experimental DRM SBS L/R alternation at %.3f Hz (NO USB)\n", hz);
+        const char *recover = getenv("MPV_DRM_STEREO_RECOVER");
+        vo->drm->stereo_recover = recover && strcmp(recover, "1") == 0;
+        MP_INFO(vo, "Experimental DRM SBS L/R alternation at %.3f Hz "
+                "(NO USB, hardware phase recovery %s)\n",
+                hz, vo->drm->stereo_recover ? "on" : "off");
 #else
         MP_ERR(vo, "MPV_DRM_STEREO_SBS=1 was built without DRM support\n");
         goto err_out;
