@@ -863,3 +863,69 @@ corrective benefit for this workload and may add unnecessary overhead.
 
 This new instrumentation was not compiled or hardware-tested
 when committed. The emitter must remain disabled.
+
+
+### Fifth run: RT=1, SEQ=0, GPU_WAIT=0, atomic ioctl tracing
+
+The latest 113-second run, using the same Half-SBS film and display:
+
+| Metric | Result |
+| --- | ---: |
+| Completed KMS flips | 13,560 |
+| Report windows | 113 |
+| Missed physical vblanks / wrong-eye flips | 9 / 9 |
+| Misses per minute | ~4.78 |
+| Non-error window refresh rate | 119.991-119.992 Hz |
+| Pair renders by the final report | 2,711 |
+| Pair-update skips / commit errors | 0 / 0 |
+| End A-V deviation | ~+7 ms |
+
+Every one of nine missed refreshes happened on the L->R edge.
+Only the **first** missed refresh had a slow synchronous atomic
+ioctl (13.958 ms). The other **eight** missed refreshes had
+ordinary fast ioctls (0.089-0.119 ms), and a prompt userspace
+callback-to-submit delay of 0.012-0.021 ms. Despite those quick
+submissions, their commit-to-callback times were 16.515-16.748 ms
+rather than one ~8.33 ms vblank. Thus synchronous ioctl blocking
+explains only 1 of the 9 misses. The remaining events were delayed
+after the ioctl returned; potential causes include KMS plane scheduling,
+fences, or driver workqueues. Their kernel-level cause is not yet
+established by these userspace measurements.
+
+The observed 9/113s rate is close to the earlier 9/97s RT=1,
+SEQ=1, GPU_WAIT=0 result. There has been no evidence of a CRTC
+sequence catchup in any previous SEQ=1 run.
+
+### Optional legacy CRTC pageflip control experiment
+
+`MPV_DRM_STEREO_LEGACY=1` selects `drmModePageFlip()` with
+`DRM_MODE_PAGE_FLIP_EVENT` on the already configured CRTC.
+The same prepared GBM framebuffer is used, and the independent
+KMS worker, page-flip callbacks, MSC eye prediction, video pacing,
+audio sync, and frame pair buffers are unchanged. Initial mode
+setting and restoration still use the existing atomic implementation.
+
+This is an experimental legacy API comparison with the atomic
+`FB_ID + CRTC_ID` path. It assumes the selected draw plane is
+the CRTC **primary** plane (the default); do not use it with a
+manually selected overlay plane. If the legacy operation is rejected
+with EINVAL, ENOTTY, EOPNOTSUPP or ENOSYS, it automatically
+disables the experiment and switches to the existing atomic flip
+path. Other errors follow the standard bounded retry/stop logic.
+The legacy path is disabled by default.
+
+New log fields are `legacy=on/off`, `legacy_flips`, and
+`legacy_fallbacks`. The existing `atomic_ioctl_ms` and
+`max_atomic_ioctl_ms` fields are reused for the active pageflip
+ioctl in this experiment, despite their historical names.
+
+Recommended comparison with identical mpv options and input:
+`RT=1 SEQ=0 GPU_WAIT=0 LEGACY=0` (existing baseline) vs
+`RT=1 SEQ=0 GPU_WAIT=0 LEGACY=1`.
+Test LEGACY=1 briefly first, verify that the initial flip is
+labelled `legacy` and `legacy=on legacy_flips>0` appears in
+reports. Then run it for ~2 minutes and compare missed_vblanks,
+direction distribution, A-V stability and max_atomic_ioctl_ms.
+Do not interpret a fallback run as having tested legacy scanout.
+The change is **not compiled or runtime verified on the user's
+GPU**; retain the working atomic path and keep USB disabled.
