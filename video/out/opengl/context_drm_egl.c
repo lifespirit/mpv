@@ -502,15 +502,26 @@ static void stereo_drain_retired(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv;
     struct stereo_kms *s = &p->stereo;
+    struct stereo_pair retired[MP_ARRAY_SIZE(s->retired)];
+    unsigned num_retired;
+    bool first_flip_done;
+
+    // GBM release/unref may take locks or invoke DRM framebuffer removal.
+    // Do not make the 120 Hz KMS worker wait on that potentially slow work.
     pthread_mutex_lock(&s->mutex);
-    for (unsigned i = 0; i < s->num_retired; i++)
-        stereo_release_pair(p, &s->retired[i]);
+    num_retired = s->num_retired;
+    for (unsigned i = 0; i < num_retired; i++)
+        retired[i] = s->retired[i];
     s->num_retired = 0;
-    // At startup the initial EGL BO was assigned to the CRTC, but is not
-    // part of the stereo pair. Release it only after the first KMS flip.
-    if (s->first_flip_done && p->gbm.num_bos)
-        swapchain_step(ctx);
+    first_flip_done = s->first_flip_done;
     pthread_mutex_unlock(&s->mutex);
+
+    for (unsigned i = 0; i < num_retired; i++)
+        stereo_release_pair(p, &retired[i]);
+    // The initial EGL BO is no longer scanned out after the first flip.
+    // The startup queue is used by the producer thread only.
+    if (first_flip_done && p->gbm.num_bos)
+        swapchain_step(ctx);
 }
 
 static void *stereo_kms_thread(void *arg)
