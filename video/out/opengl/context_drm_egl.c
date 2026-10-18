@@ -480,6 +480,173 @@ static void stereo_align_pending(struct ra_ctx *ctx)
     }
 }
 
+
+// A retired pair is owned exclusively by the rendering thread after a
+// confirmed flip has removed the final reference to its old scanout BO.
+// The worker never calls into EGL or GBM, avoiding cross-thread EGL use.
+static void stereo_release_pair(struct priv *p, struct stereo_pair *pair)
+{
+    if (pair->bo[0])
+        gbm_surface_release_buffer(p->gbm.surface, pair->bo[0]);
+    if (pair->bo[1])
+        gbm_surface_release_buffer(p->stereo.right_gbm, pair->bo[1]);
+    *pair = (struct stereo_pair){0};
+}
+
+static void stereo_drain_retired(struct ra_ctx *ctx)
+{
+    struct priv *p = ctx->priv;
+    struct stereo_kms *s = &p->stereo;
+    pthread_mutex_lock(&s->mutex);
+    for (unsigned i = 0; i < s->num_retired; i++)
+        stereo_release_pair(p, &s->retired[i]);
+    s->num_retired = 0;
+    // At startup the initial EGL BO was assigned to the CRTC, but is not
+    // part of the stereo pair. Release it only after the first KMS flip.
+    if (s->first_flip_done && p->gbm.num_bos)
+        swapchain_step(ctx);
+    pthread_mutex_unlock(&s->mutex);
+}
+
+static void *stereo_kms_thread(void *arg)
+{
+    struct ra_ctx *ctx = arg;
+    struct priv *p = ctx->priv;
+    struct stereo_kms *s = &p->stereo;
+    struct vo_drm_state *drm = ctx->vo->drm;
+    uint64_t errors = 0;
+
+    while (true) {
+        pthread_mutex_lock(&s->mutex);
+        while (!s->stop && !s->active.bo[0])
+            pthread_cond_wait(&s->ready, &s->mutex);
+        if (s->stop) {
+            pthread_mutex_unlock(&s->mutex);
+            break;
+        }
+        // The first hardware flip anchors L as the physical phase; after
+        // that every choice comes from the last confirmed KMS MSC parity.
+        int eye = drm->stereo_have_flip
+            ? drm->stereo_base_eye ^
+              ((drm->stereo_last_msc + 1u - drm->stereo_base_msc) & 1u)
+            : 0;
+
+        // A pair generation may be replaced only on an L boundary. Do
+        // not free the old generation until the new L flip is confirmed.
+        bool promote = eye == 0 && s->pending.bo[0] &&
+                       s->num_retired < MP_ARRAY_SIZE(s->retired);
+        struct stereo_pair *selected = promote ? &s->pending : &s->active;
+        struct framebuffer *fb = gbm_bo_get_user_data(selected->bo[eye]);
+        if (!drm->active || !fb || !fb->id) {
+            pthread_mutex_unlock(&s->mutex);
+            usleep(3000);
+            continue;
+        }
+
+        drmModeAtomicReqPtr req = drmModeAtomicAlloc();
+        int ret = -1;
+        if (req) {
+            struct drm_atomic_context *atomic = drm->atomic_context;
+            if (drm_object_set_property(req, atomic->draw_plane,
+                                        "FB_ID", fb->id) >= 0 &&
+                drm_object_set_property(req, atomic->draw_plane,
+                                        "CRTC_ID", atomic->crtc->id) >= 0 &&
+                drm_object_set_property(req, atomic->draw_plane,
+                                        "ZPOS", 1) >= 0)
+                ret = drmModeAtomicCommit(drm->fd, req,
+                            DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT,
+                            drm);
+            drmModeAtomicFree(req);
+        }
+        struct stereo_pair old = {0};
+        if (!ret) {
+            if (promote) {
+                old = s->active;
+                s->active = s->pending;
+                s->pending = (struct stereo_pair){0};
+            }
+            drm->stereo_flip_eye = eye;
+            drm->stereo_commit_target_valid = false;
+            drm->stereo_commit_time_ns = mp_time_ns();
+            drm->stereo_commit_draw_time_ns = 0;
+            drm->stereo_pair_display_generation = s->active.generation;
+            if (!promote)
+                drm->stereo_pair_repeated_flips++;
+            drm->waiting_for_flip = true;
+        } else {
+            drm->stereo_commit_errors++;
+            errors++;
+            if (errors <= 5 || errors % 120 == 0)
+                MP_WARN(ctx, "Stereo KMS atomic flip failed: %s\n",
+                        mp_strerror(errno));
+        }
+        pthread_mutex_unlock(&s->mutex);
+
+        if (ret) {
+            usleep(3000);
+            continue;
+        }
+
+        // Only this thread drains DRM page-flip events in paired mode.
+        // The callback records the true MSC and updates the next phase.
+        bool complete = false;
+        while (!complete) {
+            struct pollfd fd = {.fd = drm->fd, .events = POLLIN};
+            int n = poll(&fd, 1, 50);
+            pthread_mutex_lock(&s->mutex);
+            if (n > 0 && (fd.revents & POLLIN)) {
+                if (drmHandleEvent(drm->fd, &drm->ev) < 0) {
+                    MP_ERR(ctx, "Stereo DRM event processing failed\n");
+                    s->stop = true;
+                }
+            } else if (n < 0 && errno != EINTR) {
+                MP_ERR(ctx, "Stereo DRM poll failed: %s\n",
+                       mp_strerror(errno));
+                s->stop = true;
+            }
+            complete = !drm->waiting_for_flip || s->stop;
+            if (complete && old.bo[0]) {
+                // If stopping on a timeout, uninit will first restore the
+                // old CRTC state before any retired BO is released.
+                if (s->num_retired < MP_ARRAY_SIZE(s->retired))
+                    s->retired[s->num_retired++] = old;
+                old = (struct stereo_pair){0};
+            }
+            if (complete && !s->stop)
+                s->first_flip_done = true;
+            pthread_mutex_unlock(&s->mutex);
+        }
+    }
+    return NULL;
+}
+
+// These helpers are only invoked on the original VO/EGL thread.
+bool vo_drm_stereo_pair_can_capture(struct ra_ctx *ctx)
+{
+    struct priv *p = ctx->priv;
+    struct stereo_kms *s = &p->stereo;
+    if (!s->enabled || !s->initialized)
+        return false;
+    stereo_drain_retired(ctx);
+    return gbm_surface_has_free_buffers(p->gbm.surface) &&
+           gbm_surface_has_free_buffers(s->right_gbm);
+}
+
+bool vo_drm_stereo_pair_begin_eye(struct ra_ctx *ctx, int eye)
+{
+    struct priv *p = ctx->priv;
+    struct stereo_kms *s = &p->stereo;
+    if (!s->enabled || (eye != 0 && eye != 1))
+        return false;
+    EGLSurface surface = eye ? s->right_egl : p->egl.surface;
+    if (!eglMakeCurrent(p->egl.display, surface, surface, p->egl.context)) {
+        MP_ERR(ctx, "Cannot bind stereo eye %d EGL surface\n", eye);
+        return false;
+    }
+    s->capture_eye = eye;
+    return true;
+}
+
 static void drm_egl_swap_buffers(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv;
