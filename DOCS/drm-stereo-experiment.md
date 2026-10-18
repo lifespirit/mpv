@@ -1394,3 +1394,50 @@ has completed, nor does it set a constant 16ms delay.
 Do not enable `FREEZE_PAIR=1` in the threshold tests.
 No code changes to the underlying algorithm were made
 following this log analysis.
+
+
+### Fourteenth run: 16ms age gate, zero skips over 110s
+
+`mpv-drm-stereo-pair-depth3-rt-1(20261018-210642).log`
+was captured with `MIN_PAIR_AGE_MS=16` and normal
+`FREEZE_PAIR=0` playback on Intel i915 / Mesa Iris Xe
+at 119.998Hz. The capture has 110 complete 120-flip
+reporting windows: 13,200 confirmed KMS page-flip events,
+approximately 110.0s, **zero DRM SBS gap records**,
+and cumulative `missed_vblanks=0`, `parity_errors=0`,
+`wrong_eye=0`, `wrong_hold=0`, `commit_errors=0`,
+`pair_update_skips=0`. The final `shown_hz` and
+`window_hz` were 119.997Hz, with `max_gap=1`.
+
+The normal video producer kept running at ~23.976fps:
+`pair_gen=2638`, `pair_renders=2639`,
+`draws=5278`, `first_eye_L=2638`,
+`first_eye_R=2638`; the recorded movie position reached
+approximately `00:01:50` with A/V error around zero.
+The log ends there without a clean mpv shutdown message,
+so results apply to the last complete reporting window.
+No indications that the pair was frozen or playback paused.
+
+Side-by-side short run evidence:
+
+| Pair min age | Confirmed KMS flips | Approx runtime | Skips |
+| --- | ---: | ---: | ---: |
+| 0ms (baseline run 7) | 13,680 | 114s | 11 |
+| 16ms (this run) | 13,200 | 110s | **0** |
+| 25ms (run 10) | 13,920 | 116s | **0** |
+
+This is now two substantial runs with regularly changing
+L/R buffers and no misses when an age gate is enabled.
+This does not establish a hard real-time guarantee or GPU
+fence completion, and the MPV A/V offset does not measure
+added presentation latency.
+
+Next characterize the lower limit: try
+`MIN_PAIR_AGE_MS=12`, then `8` if still zero,
+holding all other variables and test length (~120s) fixed.
+A 16ms L-boundary age requirement means the first R
+submission is roughly >=24.3ms from CPU publication
+assuming adjacent 120Hz flips; this need not be the
+actual rendering-completion-to-photon delay. If
+failures return at 12ms, repeat 16ms and consider 14ms
+to bound the useful range. Keep 16ms as tested fallback.
