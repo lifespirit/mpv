@@ -996,6 +996,22 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                 drm->stereo_max_gap = steps;
             if (steps > 1 && steps < 1000) {
                 drm->stereo_missed_slots += steps - 1;
+                // Scanout retained the previous eye for every skipped
+                // physical slot. Count mismatches against the absolute
+                // alternating-eye timeline.
+                for (uint32_t n = 1; n < steps; ++n) {
+                    const int expected = drm->stereo_base_eye ^
+                            ((msc - steps + n - drm->stereo_base_msc) & 1u);
+                    if (drm->stereo_last_eye != expected)
+                        ++drm->stereo_wrong_hold_slots;
+                }
+                // Optional and explicitly experimental: future software
+                // renders compensate an odd number of skipped scanouts.
+                // The already-queued flip cannot be corrected here.
+                if (drm->stereo_recover && ((steps - 1) & 1u)) {
+                    drm->stereo_phase_correction ^= 1u;
+                    ++drm->stereo_corrections;
+                }
                 MP_WARN(drm, "DRM SBS gap: skipped=%u refreshes msc=%u "
                         "previous_msc=%u old_eye=%s incoming_eye=%s\n",
                         steps - 1, msc, drm->stereo_last_msc,
@@ -1007,7 +1023,13 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                 ++drm->stereo_parity_errors;
         } else {
             drm->stereo_window_first_ust_us = when_us;
+            drm->stereo_base_msc = msc;
+            drm->stereo_base_eye = drm->stereo_flip_eye;
         }
+        const int expected_eye = drm->stereo_base_eye ^
+                                ((msc - drm->stereo_base_msc) & 1u);
+        if (drm->stereo_flip_eye != expected_eye)
+            ++drm->stereo_absolute_eye_errors;
         drm->stereo_have_flip = true;
         drm->stereo_last_eye = drm->stereo_flip_eye;
         drm->stereo_last_msc = msc;
@@ -1027,9 +1049,16 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                                           drm->stereo_last_report_missed;
             const uint64_t window_parity = drm->stereo_parity_errors -
                                           drm->stereo_last_report_parity;
+            const uint64_t window_absolute = drm->stereo_absolute_eye_errors -
+                                             drm->stereo_last_report_absolute;
+            const uint64_t window_hold = drm->stereo_wrong_hold_slots -
+                                         drm->stereo_last_report_hold;
             MP_INFO(drm, "DRM SBS test: flips=%llu shown_hz=%.3f "
                     "window_hz=%.3f window_missed=%llu window_parity=%llu "
                     "missed_vblanks=%llu parity_errors=%llu max_gap=%u "
+                    "wrong_eye=%llu window_wrong_eye=%llu "
+                    "wrong_hold=%llu window_wrong_hold=%llu "
+                    "recovery=%s corrections=%llu "
                     "draws=%llu commit_errors=%llu msc=%u eye=%s "
                     "(video output only; USB disabled)\n",
                     (unsigned long long)drm->stereo_flips, shown_hz,
@@ -1039,12 +1068,20 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     (unsigned long long)drm->stereo_missed_slots,
                     (unsigned long long)drm->stereo_parity_errors,
                     drm->stereo_max_gap,
+                    (unsigned long long)drm->stereo_absolute_eye_errors,
+                    (unsigned long long)window_absolute,
+                    (unsigned long long)drm->stereo_wrong_hold_slots,
+                    (unsigned long long)window_hold,
+                    drm->stereo_recover ? "on" : "off",
+                    (unsigned long long)drm->stereo_corrections,
                     (unsigned long long)drm->stereo_draws,
                     (unsigned long long)drm->stereo_commit_errors, msc,
                     drm->stereo_flip_eye ? "R" : "L");
             drm->stereo_last_report_ust_us = when_us;
             drm->stereo_last_report_missed = drm->stereo_missed_slots;
             drm->stereo_last_report_parity = drm->stereo_parity_errors;
+            drm->stereo_last_report_absolute = drm->stereo_absolute_eye_errors;
+            drm->stereo_last_report_hold = drm->stereo_wrong_hold_slots;
             drm->stereo_max_gap = 0;
         }
     }
