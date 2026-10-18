@@ -1774,3 +1774,67 @@ measured against wall-clock optical output.
 **Do not attach/drive shutter glasses** based solely
 on a successful two-minute experiment: test longer
 runs and recover phase on missed hardware refreshes.
+
+
+### Twentieth run: EGL native-fence plus 25ms age, successful 118s smoke test
+
+User log: `mpv-drm-stereo-pair-depth3-rt-1(20261018-221311).log`.
+It confirms that the new EGL extension probe succeeds on
+Intel i915/Mesa Iris Xe (TGL GT2) and the runtime prints
+`Stereo native fences enabled`. Test conditions:
+`MPV_DRM_STEREO_NATIVE_FENCE=1`,
+`MIN_PAIR_AGE_MS=25`, `FREEZE_PAIR=0`,
+`GPU_WAIT=0`, `SCHED_FIFO(10)`, normal video playback.
+
+All 118 completed 120-flip report windows were checked:
+**14,160 KMS events (~118s), no DRM SBS gap**, zero
+`missed_vblanks`, `parity_errors`, `wrong_eye`,
+`wrong_hold`, `pair_update_skips`, or
+`commit_errors`. The reported cumulative
+`shown_hz=119.997`; the per-window refresh readings
+ranged from 119.995 to 119.998 Hz. Maximum observed
+per-window `max_commit_callback_ms` was 9.137ms,
+and `max_atomic_ioctl_ms` was 1.182ms at startup.
+The movie reached ~00:01:57.
+
+At the final complete report:
+`flips=14160 pair_gen=2830 pair_renders=2831
+draws=5662 first_eye_L=2827 first_eye_R=2827
+native_fence=on fence_checks=2841
+fence_promotions=2826 fence_deferrals=14
+fence_unready_L=5 fence_unready_R=14
+fence_errors=0`.
+
+The fence gate does **actually defer** promotion.
+Twelve of the fourteen failed nonblocking fence checks
+happened before the first one-second report, including
+five unsignaled L and twelve unsignaled R results.
+The other two appeared in the ~111s and ~113s
+report windows and affected the **right fence only**.
+All other reports confirmed continued replacement at
+~24fps and no resulting KMS timing miss.
+
+This is a successful smoke test for EGL native-fence
+creation, export, cleanup, asynchronous poll and normal
+producer/worker interaction. It is **not** evidence
+that native fences alone stop first-R misses, because
+the previously successful 25ms CPU age gate remained
+enabled. The 14 deferrals are a count of *checks*,
+not necessarily fourteen distinct dropped video frames;
+the initial 12 may repeatedly concern generation 1.
+
+Recommended next controlled A/B: leave
+`NATIVE_FENCE=1` and all the same mpv options,
+but set `MIN_PAIR_AGE_MS=0`; play for >=10 minutes
+(preferably 15) with `FREEZE_PAIR=0`.
+Check `fence_errors=0`, cumulative
+`fence_deferrals`, `first_eye_R_misses`,
+`pair_update_skips`, and `pair_gen`.
+The previous 0ms no-fence baseline had 11 missed
+vblanks over ~114s. Native fence polling measures
+the GL fence signaling state, **not** atomic plane's
+ability to schedule a newly introduced FB by the
+next scanout. If misses recur with fences signaled,
+investigate DRM atomic `IN_FENCE_FD` semantics
+and/or the kernel scheduling path rather than simply
+declaring synchronization solved.
