@@ -1365,7 +1365,9 @@ The last report:
 
 Prior similar-run comparison:
 - normal `MIN_PAIR_AGE_MS=0`: 11 misses in ~114s,
-  all first L->R on new pair presentation in the kernel trace;
+  all L->R as recorded in mpv and correlated with kernel events.
+  The *first presentation* flag was not available in that run;
+  two later baseline misses were both confirmed `first_eye=1`;
 - `FREEZE_PAIR=1`: 0 misses over ~103s with 2,471
   video pairs rendered but unchanged scanned-out generation;
 - `MIN_PAIR_AGE_MS=25`, `FREEZE_PAIR=0`: 0 misses
