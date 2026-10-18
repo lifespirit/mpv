@@ -203,6 +203,10 @@ struct vo_drm_state {
     // Opt-in dual-surface producer / independent DRM vblank scanout.
     // Stereo pair operations are implemented by the drm EGL context.
     bool stereo_pair_mode;
+    // Optional legacy CRTC page-flip experiment; atomic remains default.
+    bool stereo_pair_legacy_mode;
+    uint64_t stereo_pair_legacy_flips;
+    uint64_t stereo_pair_legacy_fallbacks;
     bool stereo_pair_sequence_mode;
     uint64_t stereo_pair_sequence_catchups;
     bool stereo_pair_gpu_wait;
