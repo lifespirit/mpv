@@ -2117,3 +2117,83 @@ improve producer phase/queue capacity vs scheduling
 new KMS atomic FBs with explicit plane fences.
 The patch was source-reviewed but not compiled
 on the target user's Intel host.
+
+
+### Twenty-third run: 18 pending generations dropped, all ready at discard (14m27s)
+
+Log: `mpv-drm-stereo-pair-depth3-rt-1(20261018-231530).log`,
+14,552 lines, **867** full 120-flip KMS reports, on Intel
+i915/TGL GT2, native EGL fences on, age gate off,
+SCHED_FIFO(10), full-rate stereo movie playback.
+Last reported KMS flips **104,040** (~867s = 14m27s),
+`shown_hz=119.997`, `window_hz` 119.996–119.998Hz.
+Zero `DRM SBS gap`, missed vblank, parity/eye mistakes,
+`pair_update_skips`, `fence_errors`, or commit failures.
+Worst per-second max DRM commit-to-callback duration
+was **9.136ms**, with no ~16.6ms late flip.
+
+Last counters:
+`pair_gen=20806 pair_renders=20807
+first_eye_L=20788 first_eye_R=20788
+pair_unpresented_discards=18
+fence_checks=39792 fence_promotions=20787
+fence_deferrals=19004 fence_unready_L=10240
+fence_unready_R=19004 fence_errors=0
+first_age_L_min_ms=3.253 first_age_L_avg_ms=26.236
+first_age_L_max_ms=41.189
+first_age_R_min_ms=8.114 first_age_R_avg_ms=34.562
+first_age_R_max_ms=49.500`.
+
+**Crucial new finding from event-level drop logs:**
+Exactly **18** complete pending generations were discarded
+(18/20807 = 0.0865% of producer pair renders).
+**All 18** were discarded with reason
+`newer_generation`; none via `gbm_pressure`.
+Every drop event showed `fence_L=1 fence_R=1`
+at the time the *next* generation overwrote pending.
+Seventeen discarded pairs had exactly
+`left_boundary_fence_deferrals=2`; one (generation
+10668) had **3** unsuccessful earlier left-boundary
+promotion checks. The discarded pairs' publication-to-
+discard ages ranged from **33.258ms** to **42.035ms**
+(median **41.733ms**, mean **39.782ms**).
+
+Representative log: `pending_gen=5667 active_gen=5666
+pending_age_ms=41.764 fence_L=1 fence_R=1
+left_boundary_fence_deferrals=2`.
+There are several short clusters, notably around
+5m, 7m25s, and ~12m of movie playback; counts remain
+small and KMS alternation remains flawless.
+
+Interpretation: the producer overwrites a previous
+pending frame that had missed earlier *L-only*
+eligibility opportunities because its fences were
+unsignaled then. It is **incorrect** to conclude that
+the GPU was ready at those earlier L boundaries just
+because both fences had signaled by the time of
+replacement. Most drops occur near the film-frame
+period (~41.71ms), suggesting interaction between
+GPU readiness, 16.67ms eligible L promotion intervals,
+and one-slot pending generation storage. This remains
+a hypothesis until the age at each deferral is
+measured.
+
+Following this log, a new per-pair diagnostic collects
+`first_deferral_age_ms`, `last_deferral_age_ms`,
+and `last_deferral_target_msc` and prints them in
+the existing `Stereo unpresented pair discarded:`
+log line. These fields record actual unsuccessful
+L-boundary checks on the KMS worker; they are separate
+from `pending_age_ms` and final fence states at
+producer discard. This does not add waits or alter
+promotion scheduling. It requires recompiling mpv.
+
+Next controlled test: continue `NATIVE_FENCE=1`,
+`MIN_PAIR_AGE_MS=0` normal playback (~10–15min),
+and compare first/last deferral ages with the ~34–42ms
+overwrite ages. Do not attempt to promote new stereo
+pairs at right-eye boundaries: that could display
+L and R from different movie frames. Do not
+prematurely add a FIFO without accounting for only
+three BOs per eye on these Mesa GBM surfaces and
+the active/pending/building/retired frame lifetimes.
