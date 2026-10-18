@@ -628,8 +628,14 @@ bool vo_drm_stereo_pair_can_capture(struct ra_ctx *ctx)
     if (!s->enabled || !s->initialized)
         return false;
     stereo_drain_retired(ctx);
-    return gbm_surface_has_free_buffers(p->gbm.surface) &&
-           gbm_surface_has_free_buffers(s->right_gbm);
+    bool available = gbm_surface_has_free_buffers(p->gbm.surface) &&
+                     gbm_surface_has_free_buffers(s->right_gbm);
+    if (!available) {
+        pthread_mutex_lock(&s->mutex);
+        ctx->vo->drm->stereo_pair_update_skips++;
+        pthread_mutex_unlock(&s->mutex);
+    }
+    return available;
 }
 
 bool vo_drm_stereo_pair_begin_eye(struct ra_ctx *ctx, int eye)
@@ -898,8 +904,15 @@ static bool probe_gbm_modifiers(struct ra_ctx *ctx)
 
 static void drm_egl_get_vsync(struct ra_ctx *ctx, struct vo_vsync_info *info)
 {
+    struct priv *p = ctx->priv;
     struct vo_drm_state *drm = ctx->vo->drm;
+    // The paired KMS worker calls drm_pflip_cb on another thread.
+    // Protect present_sync_get_info against concurrent updates.
+    if (p->stereo.initialized)
+        pthread_mutex_lock(&p->stereo.mutex);
     present_sync_get_info(drm->present, info);
+    if (p->stereo.initialized)
+        pthread_mutex_unlock(&p->stereo.mutex);
 }
 
 static pl_color_space_t drm_egl_preferred_csp(struct ra_ctx *ctx)
