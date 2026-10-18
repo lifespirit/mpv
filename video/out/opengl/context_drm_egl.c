@@ -546,17 +546,29 @@ static void *stereo_kms_thread(void *arg)
 
         drmModeAtomicReqPtr req = drmModeAtomicAlloc();
         int ret = -1;
+        int failed_errno = ENOMEM;
+        int fb_property = -1;
+        int crtc_property = -1;
         if (req) {
             struct drm_atomic_context *atomic = drm->atomic_context;
-            if (drm_object_set_property(req, atomic->draw_plane,
-                                        "FB_ID", fb->id) >= 0 &&
-                drm_object_set_property(req, atomic->draw_plane,
-                                        "CRTC_ID", atomic->crtc->id) >= 0 &&
-                drm_object_set_property(req, atomic->draw_plane,
-                                        "ZPOS", 1) >= 0)
+            fb_property = drm_object_set_property(req, atomic->draw_plane,
+                                                  "FB_ID", fb->id);
+            crtc_property = drm_object_set_property(req, atomic->draw_plane,
+                                                    "CRTC_ID", atomic->crtc->id);
+            // ZPOS is optional, and is often immutable or missing on AMD.
+            // The ordinary mpv queue_flip() deliberately does not check
+            // its result. A failure must NOT prevent the entire atomic
+            // request from being submitted (the old bug yielded "Success"
+            // errors and a permanent black screen).
+            if (fb_property >= 0 && crtc_property >= 0) {
+                drm_object_set_property(req, atomic->draw_plane, "ZPOS", 1);
                 ret = drmModeAtomicCommit(drm->fd, req,
                             DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT,
                             drm);
+                failed_errno = ret ? errno : 0;
+            } else {
+                failed_errno = EINVAL;
+            }
             drmModeAtomicFree(req);
         }
         struct stereo_pair old = {0};
@@ -578,8 +590,10 @@ static void *stereo_kms_thread(void *arg)
             drm->stereo_commit_errors++;
             errors++;
             if (errors <= 5 || errors % 120 == 0)
-                MP_WARN(ctx, "Stereo KMS atomic flip failed: %s\n",
-                        mp_strerror(errno));
+                MP_WARN(ctx, "Stereo KMS flip failed: fb_prop=%d "
+                        "crtc_prop=%d commit_rc=%d errno=%d (%s)\n",
+                        fb_property, crtc_property, ret,
+                        failed_errno, mp_strerror(failed_errno));
         }
         pthread_mutex_unlock(&s->mutex);
 
