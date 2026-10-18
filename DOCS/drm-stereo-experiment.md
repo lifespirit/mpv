@@ -1838,3 +1838,92 @@ next scanout. If misses recur with fences signaled,
 investigate DRM atomic `IN_FENCE_FD` semantics
 and/or the kernel scheduling path rather than simply
 declaring synchronization solved.
+
+
+### Twenty-first run: native fences ALONE, 0ms age, zero KMS misses over 11m34s
+
+The file `mpv-drm-stereo-pair-depth3-rt-1(20261018-222825).log`
+was recorded on Intel i915 / Mesa TGL GT2, 119.998Hz,
+normal Half-SBS 23.976fps playback, with
+`MPV_DRM_STEREO_NATIVE_FENCE=1`,
+`MPV_DRM_STEREO_MIN_PAIR_AGE_MS=0`,
+`MPV_DRM_STEREO_FREEZE_PAIR=0`, and `GPU_WAIT=0`.
+This is the first long A/B run with **no fixed
+age gate** and actual nonblocking EGL native-fence
+checks on both eyes.
+
+The uploaded log contains 11,733 lines and exactly
+694 complete 120-flip diagnostic windows: **83,280
+confirmed DRM page-flip events** (~694s = 11m34s).
+The video position reached ~00:11:34. The capture
+ends without a clean player shutdown message.
+
+All 694 reporting windows were checked:
+- `missed_vblanks=0`, `window_missed=0`,
+  `parity_errors=0`, `wrong_eye=0`,
+  `wrong_hold=0`, `max_gap=1`, **no**
+  `DRM SBS gap` entries;
+- `commit_errors=0`, `pair_update_skips=0`,
+  `first_eye_L_misses=0`,
+  `first_eye_R_misses=0`;
+- `shown_hz=119.997` throughout;
+  `window_hz` ranged only 119.996–119.997Hz;
+- worst per-report `max_commit_callback_ms=9.136`
+  (no double-refresh ~16.6ms callback);
+  `max_atomic_ioctl_ms` up to 5.551ms in one
+  isolated window, with no observed KMS miss.
+
+Final diagnostic line (flips=83,280):
+`pair_gen=16654 pair_renders=16655 draws=33310
+first_eye_L=16644 first_eye_R=16644
+native_fence=on fence_checks=31965
+fence_promotions=16643 fence_deferrals=15321
+fence_unready_L=8150 fence_unready_R=15321
+fence_errors=0`.
+
+The native fences clearly **do real work**: 15,321
+readiness checks at a candidate left-eye promotion
+found the pair unready. In every deferred check the
+right fence was unready (15,321); the left was also
+unready in 8,150 of those checks. This is not the
+number of unique late frames: repeated fence polls
+and pending overwrites make deferral counts distinct
+from video-frame drop counts. The approximately
+16.6k completed new-pair promotions are consistent
+with approximately 24fps video production, but
+`pair_gen=16654` vs `fence_promotions=16643`
+indicates some prepared pair generations may have
+been superseded before first L scanout. In the present
+log there is no explicit **count** of pairs superseded
+before display; `pair_update_skips=0` measures a
+different condition.
+
+Run-to-run comparison:
+
+| Mode | Normal movie duration | Missed KMS refreshes |
+| --- | ---: | ---: |
+| No fence; min age 0ms | ~114s | 11 |
+| No fence; min age 16ms | ~661s | 3 |
+| No fence; min age 25ms | ~899s | 0 |
+| Native fence on; min age 25ms | ~118s | 0 |
+| **Native fence on; min age 0ms** | **~694s** | **0** |
+
+This is **strong evidence that real GPU-completion
+signals can replace the fixed 25ms age threshold for
+the previously observed first-R KMS miss** on this
+specific i915 setup. It does not prove that a signaled
+EGL fence guarantees a successful next-vblank page-flip
+under every workload; additional extended or stressed
+runs are needed, as well as physical optical L/R
+timing verification before enabling shutter glasses.
+
+Next: instrument the count of unpresented staging
+pairs superseded before KMS promotion, together with
+per-pair first-L and first-R CPU publication age
+histograms, to distinguish presentation cadence
+and end-to-end latency from KMS flip regularity.
+Then run >=15 minutes with `NATIVE_FENCE=1`,
+`MIN_PAIR_AGE_MS=0` under mixed scene/GPU load,
+watching both flip misses and actual pair generations
+shown. Retain the empirically supported 25ms fallback
+until the fence-only mode is validated more broadly.
