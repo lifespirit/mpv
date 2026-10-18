@@ -869,6 +869,16 @@ static void *stereo_kms_thread(void *arg)
                 s->active.ready_ns > 0 && submit_ns >= s->active.ready_ns
                     ? submit_ns - s->active.ready_ns
                     : -1;
+            if (drm->stereo_pair_first_eye_in_generation &&
+                drm->stereo_pair_age_at_submit_ns >= 0) {
+                int64_t age_ns = drm->stereo_pair_age_at_submit_ns;
+                uint64_t count = drm->stereo_pair_eye_first_flips[eye];
+                drm->stereo_pair_first_age_sum_ns[eye] += age_ns;
+                if (count == 1 || age_ns < drm->stereo_pair_first_age_min_ns[eye])
+                    drm->stereo_pair_first_age_min_ns[eye] = age_ns;
+                drm->stereo_pair_first_age_max_ns[eye] =
+                    MPMAX(drm->stereo_pair_first_age_max_ns[eye], age_ns);
+            }
             if (!promote)
                 drm->stereo_pair_repeated_flips++;
             drm->waiting_for_flip = true;
@@ -997,8 +1007,10 @@ bool vo_drm_stereo_pair_can_capture(struct ra_ctx *ctx)
         // the pair to active (under this same mutex).
         if ((!gbm_surface_has_free_buffers(p->gbm.surface) ||
              !gbm_surface_has_free_buffers(s->right_gbm)) &&
-            s->pending.bo[0])
+            s->pending.bo[0]) {
+            ctx->vo->drm->stereo_pair_unpresented_discards++;
             stereo_release_pair(p, &s->pending);
+        }
         available = gbm_surface_has_free_buffers(p->gbm.surface) &&
                     gbm_surface_has_free_buffers(s->right_gbm);
         if (!available)
@@ -1122,8 +1134,10 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
             } else {
                 // Superseded staging pairs were never submitted to KMS.
                 // Do not release active or in-flight BOs here.
-                if (s->pending.bo[0])
+                if (s->pending.bo[0]) {
+                    drm->stereo_pair_unpresented_discards++;
                     stereo_release_pair(p, &s->pending);
+                }
                 s->pending = s->building;
             }
             s->building = (struct stereo_pair){0};
