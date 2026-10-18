@@ -196,6 +196,9 @@ struct vo_drm_state {
     int64_t stereo_last_callback_cpu_ns;
     int64_t stereo_commit_after_callback_ns;
     int64_t stereo_max_submit_after_callback_ns;
+    // Duration spent inside drmModeAtomicCommit() (including kernel blocking).
+    int64_t stereo_commit_ioctl_ns;
+    int64_t stereo_max_commit_ioctl_ns;
 
     // Opt-in dual-surface producer / independent DRM vblank scanout.
     // Stereo pair operations are implemented by the drm EGL context.
