@@ -998,3 +998,55 @@ threshold from 8.333 ms alone; the hardware cutoff may be earlier.
 
 These instrumentation commits are not yet compiled or tested on
 the actual Linux DRM/AMDGPU host.
+
+
+### Seventh run: signed DRM UST measurements (phase instrumentation bug)
+
+The new 113-second atomic, `RT=1 SEQ=0 GPU_WAIT=0 LEGACY=0`
+experiment again showed **9 of 13,560 physical flips** missing one
+refresh slot (7 L->R, 2 R->L). KMS RT scheduling worked, frame pairing
+had zero dropped updates, atomic ioctl was only 0.089-0.114 ms during
+all 9 missed flips, and A-V ended near +7 ms. 113 one-second windows
+were recorded; clean-window frequency was about 120.000 Hz.
+
+Critically, **ALL nine gaps** logged
+`prev_callback_lag_ms=-0.000 submit_after_ust_ms=-0.000`.
+These values are **not measured zeros**: prior diagnostic logic
+replaced any negative or >=1000 ms CLOCK_MONOTONIC-minus-UST
+difference with the integer -1 nanosecond, which printf rounds to
+`-0.000` milliseconds. On the other hand, 74/113 windows had valid
+positive `max_callback_lag_ms` values up to 0.409 ms, and
+`max_submit_after_ust_ms` reached 0.464 ms. Therefore the
+specific timing evidence needed to distinguish stale event delivery
+from an anomalous UST value was accidentally masked.
+
+The fix keeps the **signed full-range raw difference** between
+the current `CLOCK_MONOTONIC` and the DRM flip event's UST
+(verified on the DRM fd via `DRM_CAP_TIMESTAMP_MONOTONIC`).
+No negative samples are discarded. Instead a separate validity
+flag indicates whether `clock_gettime()` ran successfully, and
+invalid values appear as `nan` in the gap log. Six decimal places
+display microsecond-scale phase information.
+
+Additional gap fields:
+`prev_lag_valid=0/1` and `submit_ust_valid=0/1`.
+
+Additional window fields:
+`negative_callback_lags` (cumulative),
+`min_callback_lag_ms` (signed),
+`min_submit_after_ust_ms` (signed), in addition to existing
+positive maxima.
+
+Run `RT=1 SEQ=0 GPU_WAIT=0 LEGACY=0` again with the rebuilt
+diagnostic version. If gap timing is negative, inspect the magnitude:
+negative `prev_callback_lag_ms` means the received UST is *ahead*
+of the userspace CPU monotonic time; positive but large means actual
+late callback, and both indicate a different path than ordinary
+immediate next-vblank flip submission. Kernel DRM helpers document
+that page-flip event MSC/UST are obtained from the KMS vblank
+timestamping machinery; AMD DC's pageflip handler has a specific
+path updating vblank count and timestamp before publishing events.
+The exact reason on this GPU and kernel remains undetermined.
+
+This change only modifies metrics, not scanout selection or timing.
+It has not been compiled or tested on the target GPU.
