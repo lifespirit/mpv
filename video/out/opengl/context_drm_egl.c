@@ -23,6 +23,7 @@
 #include <string.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -80,6 +81,7 @@ struct stereo_pair {
 struct stereo_kms {
     bool enabled;
     bool sequence_mode;
+    bool rt_mode;
     pthread_mutex_t mutex;
     pthread_cond_t ready;
     pthread_cond_t flip_ready;
@@ -535,6 +537,21 @@ static void *stereo_kms_thread(void *arg)
     unsigned consecutive_errors = 0;
     bool first_commit_logged = false;
 
+    if (s->rt_mode) {
+        // Only the self-blocking DRM event worker receives RT priority.
+        // The decoder, renderer and audio threads keep normal scheduling.
+        // No privilege escalation is attempted; permission failure falls
+        // back to the normal scheduler.
+        struct sched_param sp = {.sched_priority = 10};
+        int err = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+        if (err) {
+            MP_WARN(ctx, "Stereo KMS SCHED_FIFO(10) unavailable: %s; "
+                    "continuing with normal scheduling\n", mp_strerror(err));
+        } else {
+            MP_INFO(ctx, "Stereo KMS thread scheduling: SCHED_FIFO priority 10\n");
+        }
+    }
+
     while (true) {
         pthread_mutex_lock(&s->mutex);
         while (!s->stop && !s->active.bo[0])
@@ -594,6 +611,7 @@ static void *stereo_kms_thread(void *arg)
         int failed_errno = ENOMEM;
         int fb_property = -1;
         int crtc_property = -1;
+        int64_t submit_ns = 0;
         if (req) {
             struct drm_atomic_context *atomic = drm->atomic_context;
             fb_property = drm_object_set_property(req, atomic->draw_plane,
@@ -607,6 +625,7 @@ static void *stereo_kms_thread(void *arg)
             // errors and a permanent black screen).
             if (fb_property >= 0 && crtc_property >= 0) {
                 drm_object_set_property(req, atomic->draw_plane, "ZPOS", 1);
+                submit_ns = mp_time_ns();
                 ret = drmModeAtomicCommit(drm->fd, req,
                             DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT,
                             drm);
@@ -634,7 +653,14 @@ static void *stereo_kms_thread(void *arg)
             drm->stereo_flip_eye = eye;
             drm->stereo_commit_target_valid = sequence_target_valid;
             drm->stereo_commit_target_msc = target_msc;
-            drm->stereo_commit_time_ns = mp_time_ns();
+            drm->stereo_commit_time_ns = submit_ns;
+            drm->stereo_commit_after_callback_ns =
+                drm->stereo_last_callback_cpu_ns > 0
+                    ? MPMAX(submit_ns - drm->stereo_last_callback_cpu_ns, 0)
+                    : 0;
+            drm->stereo_max_submit_after_callback_ns =
+                MPMAX(drm->stereo_max_submit_after_callback_ns,
+                      drm->stereo_commit_after_callback_ns);
             drm->stereo_commit_draw_time_ns = 0;
             drm->stereo_pair_display_generation = s->active.generation;
             if (!promote)
@@ -1113,6 +1139,9 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     const char *seq = getenv("MPV_DRM_STEREO_SEQ");
     p->stereo.sequence_mode = p->stereo.enabled && seq &&
                               strcmp(seq, "1") == 0;
+    const char *rt = getenv("MPV_DRM_STEREO_RT");
+    p->stereo.rt_mode = p->stereo.enabled && rt &&
+                        strcmp(rt, "1") == 0;
     drm->stereo_pair_sequence_mode = p->stereo.sequence_mode;
     p->stereo.capture_eye = -1;
     if (p->stereo.enabled) {
