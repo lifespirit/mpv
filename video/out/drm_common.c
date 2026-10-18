@@ -992,8 +992,16 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
         const uint64_t when_us = (uint64_t)sec * 1000000u + usec;
         if (drm->stereo_have_flip) {
             const uint32_t steps = msc - drm->stereo_last_msc;
-            if (steps > 1 && steps < 1000)
+            if (steps > drm->stereo_max_gap)
+                drm->stereo_max_gap = steps;
+            if (steps > 1 && steps < 1000) {
                 drm->stereo_missed_slots += steps - 1;
+                MP_WARN(drm, "DRM SBS gap: skipped=%u refreshes msc=%u "
+                        "previous_msc=%u old_eye=%s incoming_eye=%s\n",
+                        steps - 1, msc, drm->stereo_last_msc,
+                        drm->stereo_last_eye ? "R" : "L",
+                        drm->stereo_flip_eye ? "R" : "L");
+            }
             if (steps == 0 || steps >= 1000 ||
                     (drm->stereo_flip_eye ^ drm->stereo_last_eye) != (steps & 1))
                 ++drm->stereo_parity_errors;
@@ -1009,16 +1017,35 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
             const uint64_t elapsed_us = when_us - drm->stereo_window_first_ust_us;
             const double shown_hz = elapsed_us > 0
                 ? (drm->stereo_flips - 1) * 1000000.0 / elapsed_us : 0.0;
+            const uint64_t since_us = when_us - (drm->stereo_last_report_ust_us
+                         ? drm->stereo_last_report_ust_us
+                         : drm->stereo_window_first_ust_us);
+            const unsigned window_flips = drm->stereo_last_report_ust_us ? 120 : 119;
+            const double window_hz = since_us > 0
+                ? window_flips * 1000000.0 / since_us : 0.0;
+            const uint64_t window_missed = drm->stereo_missed_slots -
+                                          drm->stereo_last_report_missed;
+            const uint64_t window_parity = drm->stereo_parity_errors -
+                                          drm->stereo_last_report_parity;
             MP_INFO(drm, "DRM SBS test: flips=%llu shown_hz=%.3f "
-                    "missed_vblanks=%llu parity_errors=%llu "
+                    "window_hz=%.3f window_missed=%llu window_parity=%llu "
+                    "missed_vblanks=%llu parity_errors=%llu max_gap=%u "
                     "draws=%llu commit_errors=%llu msc=%u eye=%s "
                     "(video output only; USB disabled)\n",
                     (unsigned long long)drm->stereo_flips, shown_hz,
+                    window_hz,
+                    (unsigned long long)window_missed,
+                    (unsigned long long)window_parity,
                     (unsigned long long)drm->stereo_missed_slots,
                     (unsigned long long)drm->stereo_parity_errors,
+                    drm->stereo_max_gap,
                     (unsigned long long)drm->stereo_draws,
                     (unsigned long long)drm->stereo_commit_errors, msc,
                     drm->stereo_flip_eye ? "R" : "L");
+            drm->stereo_last_report_ust_us = when_us;
+            drm->stereo_last_report_missed = drm->stereo_missed_slots;
+            drm->stereo_last_report_parity = drm->stereo_parity_errors;
+            drm->stereo_max_gap = 0;
         }
     }
     present_sync_update_values(drm->present, ust, msc);
