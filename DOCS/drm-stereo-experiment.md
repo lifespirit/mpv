@@ -2352,3 +2352,108 @@ allowing an unsafe mid-pair replacement.
 If still not ready at R, optimize GPU fence
 completion / resource pressure before
 considering deeper pair queues. 
+
+
+### Twenty-fifth run: 517s intermediate-R probe confirms fences ready before overwrite
+
+User log: `mpv-drm-stereo-pair-depth3-rt-1(20261018-235143).log`
+(8,789 lines). On the same Intel i915 / Mesa TGL GT2
+platform, the native-fence-only `MIN_PAIR_AGE_MS=0`
+path confirms **62,040 KMS flips in 517 complete
+120-flip windows (8m37s)**. The file ends at movie
+time ~00:08:38, without a clean shutdown line.
+This is **not** a 15-minute run; only the available
+8m37s can be evaluated.
+
+All 517 intervals have `missed_vblanks=0`,
+`window_missed=0`, `wrong_eye=0`,
+`wrong_hold=0`, `parity_errors=0`,
+`first_eye_L_misses=0`,
+`first_eye_R_misses=0`, `commit_errors=0`,
+`pair_update_skips=0`, `fence_errors=0`,
+with no `DRM SBS gap` events and
+`shown_hz=119.997`. Maximum observed
+per-window `max_commit_callback_ms=9.115`ms.
+
+Last complete report:
+`pair_gen=12406 pair_renders=12407 draws=24814
+first_eye_L=12401 first_eye_R=12401
+pair_unpresented_discards=5
+fence_checks=23770 fence_promotions=12400
+fence_deferrals=11369 fence_unready_L=6047
+fence_unready_R=11369 fence_errors=0
+first_age_L_min_ms=2.282 first_age_L_avg_ms=26.291
+first_age_L_max_ms=41.146
+first_age_R_min_ms=5.825 first_age_R_avg_ms=34.613
+first_age_R_max_ms=49.411`.
+Five superseded pending pairs out of 12,407 producer
+pair renders, i.e. **0.0403%** of generated pairs.
+
+The critical extra diagnostic from the
+**intermediate R-vblank probe** is now confirmed
+on all five logged discarded generations:
+
+| pending_gen | Last failed L age (ms) | R probe age (ms) | R fence L/R | Overwrite age (ms) |
+| ---: | ---: | ---: | :---: | ---: |
+| 1528 | 30.518 | 38.736 | 1/1 | 40.310 |
+| 7844 | 31.875 | 40.141 | 1/1 | 41.668 |
+| 8474 | 31.949 | 40.171 | 1/1 | 41.759 |
+| 11770 | 31.921 | 40.239 | 1/1 | 41.748 |
+| 11866 | 29.554 | 37.807 | 1/1 | 39.363 |
+
+Every discarded pair:
+- was deferred twice at an eligible L refresh
+  (`left_boundary_fence_deferrals=2`);
+- was **already signaled on both fences by the
+  intermediate R refresh**, ~8.22–8.32ms
+  after the second failed L;
+- was discarded just **1.51–1.59ms** after
+  the R probe, due to `newer_generation`;
+- had both fences signaled at discard, too;
+  no `gbm_pressure` discards occurred.
+
+This locates the readiness transition only to the
+interval **after the last failed L** but **no later
+than the subsequent R probe**. It does *not*
+prove GPU work completed at R or supply exact
+GPU fence signal timestamps. On the R event
+the KMS worker must keep the previous generation:
+promoting a new pair on R would violate the
+guarantee that both eyes see the same movie frame.
+
+At 120Hz the next permissible L is around
+8.33ms after the diagnostic R probe, while the
+24fps producer overwrites the one-slot
+`pending` approximately 1.5ms after R.
+Thus the old pending pair is ready in time for
+a **future L**, but gets overwritten before
+that opportunity. This is now primarily a
+**single-slot staging / scheduling collision**
+rather than a missed 120Hz KMS refresh.
+
+**Design direction:** do not keep adding fence
+telemetry just to rediscover this collision.
+Preserve chronological generation order and
+only promote on L, while safely retaining up
+to one older ready pair alongside a newer
+queued generation. Must FIRST account for GBM
+surface locked-buffer capacity, active/in-flight
+BO retirement, and the producer's pending
+release path: an unbounded FIFO or naive
+extra `stereo_pair` field could starve
+`gbm_surface_lock_front_buffer`.
+An alternative controlled experiment is
+bounded producer-side backpressure until
+the next L, with explicit measurements of VO
+stalls and video drops. Either strategy
+should be **opt-in** and keep the present
+fence-only mode as an unchanged baseline.
+
+Before selecting queue vs bounded backpressure,
+inventory exact per-eye BO residency at moments of
+discard, retirement and swap under the current
+GBM surfaces, then instrument total discarded
+video generations versus KMS flips and
+publication-to-submit latency. Avoid
+synchronizing USB shutters until parity
+recovery and optical shutter timing are tested.
