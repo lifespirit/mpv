@@ -1550,3 +1550,75 @@ under 16ms, use 25ms as an interim fallback and improve
 GPU buffer readiness synchronization rather than lowering
 the tolerance further. Even a zero-miss long run cannot
 guarantee safe L/R alternation for shutter glasses.
+
+
+### Seventeenth run: long 16ms age test fails three times across 11m01s
+
+The user supplied `mpv-drm-stereo-pair-depth3-rt-1(20261018-213606).log`,
+an extended normal playback run on Intel i915 (Mesa TGL GT2),
+`MIN_PAIR_AGE_MS=16`, `FREEZE_PAIR=0`, 119.998Hz.
+The log has 11,185 lines and 661 complete one-second
+(`flips % 120 == 0`) reports, reaching **79,320**
+confirmed KMS page-flip events (~661s = 11m01s).
+There are **3 missed vblanks** (three single-refresh MSC
+jumps), at movie position ~03:55, 07:47 and 10:34.
+Each occurred during the **first scanout of a new
+right-eye GBM framebuffer**, always L->R:
+- `previous_msc=4417576 msc=4417578`,
+  `pair_gen=5643 first_eye=1 pair_age_ms=24.361`,
+  `submit_after_callback_ms=0.006`,
+  `atomic_ioctl_ms=0.058 commit_callback_ms=16.676`,
+  `submit_after_ust_ms=-0.429221`;
+- `previous_msc=4445412 msc=4445414`,
+  `pair_gen=11210 first_eye=1 pair_age_ms=24.362`,
+  `submit_after_callback_ms=0.005`,
+  `atomic_ioctl_ms=0.045 commit_callback_ms=16.644`,
+  `submit_after_ust_ms=-0.374995`;
+- `previous_msc=4465398 msc=4465400`,
+  `pair_gen=15207 first_eye=1 pair_age_ms=24.517`,
+  `submit_after_callback_ms=0.013`,
+  `atomic_ioctl_ms=0.079 commit_callback_ms=16.551`,
+  `submit_after_ust_ms=-0.278198`.
+
+Counters at the last full report:
+`flips=79320 shown_hz=119.992 window_hz=119.996
+missed_vblanks=3 parity_errors=6 wrong_eye=3
+wrong_hold=3 pair_gen=15862 pair_renders=15863
+draws=31726 first_eye_L=15862 first_eye_R=15862
+first_eye_L_misses=0 first_eye_R_misses=3
+pair_update_skips=0 commit_errors=0`.
+No code or DRM commit errors were logged. Normal
+rendering and pair promotion continued monotonically;
+movie time advanced to ~11m02s.
+
+**Critical correction to prior conclusions:** 16ms is
+*not* a verified stable setting; its earlier ~110s
+zero-miss run was not representative of its longer-run
+rare failures. The 14ms and 12ms tests also missed,
+and the single 25ms result only covers ~116s.
+Do not describe 25ms as proven stable, either.
+
+The observed first-right submit pair ages at the three
+16ms failures are tightly grouped at ~24.36–24.52ms,
+compared with ~22.30–23.50ms at 14ms and
+~23.40–23.59ms at 12ms. These samples do not prove
+that a specific age (or GPU fence) is the sole cause.
+The first-right flip's callback is late by one hardware
+refresh (~16.6ms), despite immediate userspace submit
+and sub-0.1ms atomic ioctl on all three misses. This
+is consistent with a kernel/GPU scanout readiness or
+scheduling dependency on newly used BOs, not CPU
+thread late submission.
+
+Next controlled test: keep `FREEZE_PAIR=0`, set
+`MIN_PAIR_AGE_MS=25`, run **at least 10–15 minutes**
+of normal video, and inspect KMS/first-eye/VO counters.
+The 25ms L-promotion gate provides a larger margin
+before R is first scanned out, but this is still a
+timed heuristic without synchronization guarantees;
+added image latency / actual A/V presentation delay
+have not been measured. If misses persist, first
+investigate proper EGL/DRM fence readiness and scheduling,
+not a claim that an arbitrary age solves the issue.
+Do not proceed to USB shutter timing based solely on
+short-run zero-miss logs.
