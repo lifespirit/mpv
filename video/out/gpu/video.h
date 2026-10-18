@@ -208,6 +208,9 @@ void gl_video_render_frame(struct gl_video *p, struct vo_frame *frame,
 void gl_video_resize(struct gl_video *p,
                      struct mp_rect *src, struct mp_rect *dst,
                      struct mp_osd_res *osd);
+// An opt-in change of the SBS source half without resetting shader/scaler
+// history on every 120 Hz eye switch. The regular viewport remains intact.
+void gl_video_set_sbs_eye(struct gl_video *p, struct mp_rect full_src, int eye);
 void gl_video_set_fb_depth(struct gl_video *p, int fb_depth);
 void gl_video_perfdata(struct gl_video *p, struct voctrl_performance_data *out);
 void gl_video_set_clear_color(struct gl_video *p, struct m_color color);
