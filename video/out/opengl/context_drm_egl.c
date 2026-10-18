@@ -79,6 +79,7 @@ struct stereo_pair {
 
 struct stereo_kms {
     bool enabled;
+    bool sequence_mode;
     pthread_mutex_t mutex;
     pthread_cond_t ready;
     pthread_cond_t flip_ready;
@@ -542,11 +543,38 @@ static void *stereo_kms_thread(void *arg)
             pthread_mutex_unlock(&s->mutex);
             break;
         }
-        // The first hardware flip anchors L as the physical phase; after
-        // that every choice comes from the last confirmed KMS MSC parity.
+        // A confirmed flip gives the last actual MSC, but the kernel's
+        // vblank counter may already have advanced while this thread was
+        // descheduled. The optional sequence probe allows recovery before
+        // submitting the next FB_ID, instead of assuming last_msc + 1.
+        uint32_t target_msc = drm->stereo_last_msc + 1u;
+        bool sequence_target_valid = false;
+        if (drm->stereo_have_flip && s->sequence_mode) {
+            uint64_t current_seq = 0;
+            uint64_t current_ns = 0;
+            int rc = drmCrtcGetSequence(drm->fd, drm->crtc_id,
+                                        &current_seq, &current_ns);
+            if (!rc) {
+                uint32_t current = (uint32_t)current_seq;
+                // Do not regress if a driver returns stale sequence data.
+                if ((int32_t)(current - drm->stereo_last_msc) >= 0) {
+                    target_msc = current + 1u;
+                    sequence_target_valid = true;
+                    if (current != drm->stereo_last_msc)
+                        drm->stereo_pair_sequence_catchups++;
+                }
+            } else {
+                MP_WARN(ctx, "drmCrtcGetSequence unavailable (%d); "
+                        "falling back to page-flip MSC feedback\n", rc);
+                s->sequence_mode = false;
+                drm->stereo_pair_sequence_mode = false;
+            }
+        }
+        // The first successful page flip anchors L. Subsequent eyes are
+        // chosen from the target physical MSC, not the mpv draw count.
         int eye = drm->stereo_have_flip
             ? drm->stereo_base_eye ^
-              ((drm->stereo_last_msc + 1u - drm->stereo_base_msc) & 1u)
+              ((target_msc - drm->stereo_base_msc) & 1u)
             : 0;
 
         // A pair generation may be replaced only on an L boundary. Do
@@ -604,7 +632,8 @@ static void *stereo_kms_thread(void *arg)
                 s->pending = (struct stereo_pair){0};
             }
             drm->stereo_flip_eye = eye;
-            drm->stereo_commit_target_valid = false;
+            drm->stereo_commit_target_valid = sequence_target_valid;
+            drm->stereo_commit_target_msc = target_msc;
             drm->stereo_commit_time_ns = mp_time_ns();
             drm->stereo_commit_draw_time_ns = 0;
             drm->stereo_pair_display_generation = s->active.generation;
@@ -1080,6 +1109,10 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     const char *pair = getenv("MPV_DRM_STEREO_PAIR");
     p->stereo.enabled = sbs && pair &&
         strcmp(sbs, "1") == 0 && strcmp(pair, "1") == 0;
+    const char *seq = getenv("MPV_DRM_STEREO_SEQ");
+    p->stereo.sequence_mode = p->stereo.enabled && seq &&
+                              strcmp(seq, "1") == 0;
+    drm->stereo_pair_sequence_mode = p->stereo.sequence_mode;
     p->stereo.capture_eye = -1;
     if (p->stereo.enabled) {
         int err = pthread_mutex_init(&p->stereo.mutex, NULL);
