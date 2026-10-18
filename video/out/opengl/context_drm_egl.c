@@ -83,6 +83,7 @@ struct stereo_kms {
     bool sequence_mode;
     bool rt_mode;
     bool gpu_wait;
+    bool legacy_mode;
     pthread_mutex_t mutex;
     pthread_cond_t ready;
     pthread_cond_t flip_ready;
@@ -607,46 +608,81 @@ static void *stereo_kms_thread(void *arg)
             continue;
         }
 
-        drmModeAtomicReqPtr req = drmModeAtomicAlloc();
         int ret = -1;
         int failed_errno = ENOMEM;
         int fb_property = -1;
         int crtc_property = -1;
         int64_t submit_ns = 0;
-        if (req) {
-            struct drm_atomic_context *atomic = drm->atomic_context;
-            fb_property = drm_object_set_property(req, atomic->draw_plane,
-                                                  "FB_ID", fb->id);
-            crtc_property = drm_object_set_property(req, atomic->draw_plane,
-                                                    "CRTC_ID", atomic->crtc->id);
-            // ZPOS is optional, and is often immutable or missing on AMD.
-            // The ordinary mpv queue_flip() deliberately does not check
-            // its result. A failure must NOT prevent the entire atomic
-            // request from being submitted (the old bug yielded "Success"
-            // errors and a permanent black screen).
-            if (fb_property >= 0 && crtc_property >= 0) {
-                drm_object_set_property(req, atomic->draw_plane, "ZPOS", 1);
-                submit_ns = mp_time_ns();
-                ret = drmModeAtomicCommit(drm->fd, req,
-                            DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT,
-                            drm);
-                int commit_errno = errno;
-                int64_t ioctl_ns = mp_time_ns() - submit_ns;
-                drm->stereo_commit_ioctl_ns = ioctl_ns;
-                drm->stereo_max_commit_ioctl_ns =
-                    MPMAX(drm->stereo_max_commit_ioctl_ns, ioctl_ns);
-                failed_errno = ret ? commit_errno : 0;
-            } else {
-                failed_errno = EINVAL;
+        bool legacy_submitted = false;
+
+        if (s->legacy_mode) {
+            // Control experiment: legacy page-flip on the CRTC's primary
+            // plane, using exactly the same fully-rendered GBM framebuffer.
+            // Mode setup and restoration remain atomic. The regular
+            // page-flip DRM event is consumed by the existing worker.
+            submit_ns = mp_time_ns();
+            ret = drmModePageFlip(drm->fd, drm->crtc_id, fb->id,
+                                  DRM_MODE_PAGE_FLIP_EVENT, drm);
+            int flip_errno = errno;
+            int64_t ioctl_ns = mp_time_ns() - submit_ns;
+            drm->stereo_commit_ioctl_ns = ioctl_ns;
+            drm->stereo_max_commit_ioctl_ns =
+                MPMAX(drm->stereo_max_commit_ioctl_ns, ioctl_ns);
+            failed_errno = ret ? flip_errno : 0;
+            if (!ret) {
+                legacy_submitted = true;
+                drm->stereo_pair_legacy_flips++;
+            } else if (flip_errno == EINVAL || flip_errno == ENOTTY ||
+                       flip_errno == EOPNOTSUPP || flip_errno == ENOSYS) {
+                // An unsupported legacy interface should never strand a
+                // working atomic scanout. Rejected flips queue no event.
+                MP_WARN(ctx, "Stereo legacy CRTC flip unsupported (%s), "
+                        "falling back to atomic scanout\n",
+                        mp_strerror(flip_errno));
+                s->legacy_mode = false;
+                drm->stereo_pair_legacy_mode = false;
+                drm->stereo_pair_legacy_fallbacks++;
             }
-            drmModeAtomicFree(req);
+        }
+
+        // Default path, or automatic fallback when the legacy interface
+        // is unavailable. Do not resubmit after a successful page-flip.
+        if (!s->legacy_mode && !legacy_submitted) {
+            drmModeAtomicReqPtr req = drmModeAtomicAlloc();
+            ret = -1;
+            failed_errno = ENOMEM;
+            if (req) {
+                struct drm_atomic_context *atomic = drm->atomic_context;
+                fb_property = drm_object_set_property(req, atomic->draw_plane,
+                                                      "FB_ID", fb->id);
+                crtc_property = drm_object_set_property(req, atomic->draw_plane,
+                                                        "CRTC_ID", atomic->crtc->id);
+                // ZPOS is optional, and is often immutable or missing on AMD.
+                if (fb_property >= 0 && crtc_property >= 0) {
+                    drm_object_set_property(req, atomic->draw_plane, "ZPOS", 1);
+                    submit_ns = mp_time_ns();
+                    ret = drmModeAtomicCommit(drm->fd, req,
+                                DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT,
+                                drm);
+                    int commit_errno = errno;
+                    int64_t ioctl_ns = mp_time_ns() - submit_ns;
+                    drm->stereo_commit_ioctl_ns = ioctl_ns;
+                    drm->stereo_max_commit_ioctl_ns =
+                        MPMAX(drm->stereo_max_commit_ioctl_ns, ioctl_ns);
+                    failed_errno = ret ? commit_errno : 0;
+                } else {
+                    failed_errno = EINVAL;
+                }
+                drmModeAtomicFree(req);
+            }
         }
         struct stereo_pair old = {0};
         if (!ret) {
             consecutive_errors = 0;
             if (!first_commit_logged) {
-                MP_INFO(ctx, "Stereo KMS first atomic flip submitted: "
+                MP_INFO(ctx, "Stereo KMS first %s flip submitted: "
                         "eye=%c fb_id=%u generation=%llu\n",
+                        legacy_submitted ? "legacy" : "atomic",
                         eye ? 'R' : 'L', fb->id,
                         (unsigned long long)selected->generation);
                 first_commit_logged = true;
@@ -682,7 +718,7 @@ static void *stereo_kms_thread(void *arg)
                         fb_property, crtc_property, ret,
                         failed_errno, mp_strerror(failed_errno));
             if (consecutive_errors >= 60) {
-                MP_ERR(ctx, "Stereo KMS stopped after 60 consecutive atomic "
+                MP_ERR(ctx, "Stereo KMS stopped after 60 consecutive "
                         "flip failures (video scanout unavailable)\n");
                 s->stop = true;
             }
@@ -1172,6 +1208,13 @@ static bool drm_egl_init(struct ra_ctx *ctx)
                          strcmp(gpu_wait, "1") == 0;
     drm->stereo_pair_sequence_mode = p->stereo.sequence_mode;
     drm->stereo_pair_gpu_wait = p->stereo.gpu_wait;
+    const char *legacy = getenv("MPV_DRM_STEREO_LEGACY");
+    p->stereo.legacy_mode = p->stereo.enabled && legacy &&
+                            strcmp(legacy, "1") == 0;
+    drm->stereo_pair_legacy_mode = p->stereo.legacy_mode;
+    if (p->stereo.legacy_mode)
+        MP_INFO(ctx, "Stereo experimental legacy CRTC page-flip enabled "
+                "(requires CRTC primary plane; automatic atomic fallback)\n");
     if (p->stereo.gpu_wait)
         MP_INFO(ctx, "Stereo paired GPU completion wait enabled "
                 "(eglWaitClient after right-eye EGL swap)\n");
