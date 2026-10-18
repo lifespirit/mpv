@@ -229,6 +229,14 @@ struct vo_drm_state {
     bool stereo_pair_gpu_wait;
     uint64_t stereo_pair_gpu_waits;
     int64_t stereo_max_gpu_wait_ns;
+    // Optional EGL native sync_file FD readiness checks before new pairs
+    // are promoted at left-eye vblank. KMS does not block on the GPU.
+    bool stereo_pair_native_fence;
+    uint64_t stereo_pair_fence_checks;
+    uint64_t stereo_pair_fence_promotions;
+    uint64_t stereo_pair_fence_deferrals;
+    uint64_t stereo_pair_fence_unready_eye[2];
+    uint64_t stereo_pair_fence_errors;
     int stereo_capture_eye;
     uint64_t stereo_capture_generation;
     uint64_t stereo_pair_rendered;
