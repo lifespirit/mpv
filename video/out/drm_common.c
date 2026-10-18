@@ -1085,7 +1085,7 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     "wrong_eye=%llu window_wrong_eye=%llu "
                     "wrong_hold=%llu window_wrong_hold=%llu "
                     "recovery=%s corrections=%llu "
-                    "slot=%s pending=%u discards=%llu window_discards=%llu "
+                    "slot=%s pending=%u peak_pending=%u discards=%llu window_discards=%llu "
                     "target_misses=%llu window_target_misses=%llu "
                     "max_commit_callback_ms=%.3f max_draw_callback_ms=%.3f "
                     "draws=%llu commit_errors=%llu msc=%u eye=%s "
@@ -1105,6 +1105,7 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     (unsigned long long)drm->stereo_corrections,
                     drm->stereo_slot_mode ? "on" : "off",
                     drm->stereo_queue_ahead,
+                    drm->stereo_queue_peak,
                     (unsigned long long)drm->stereo_queue_discards,
                     (unsigned long long)window_discards,
                     (unsigned long long)drm->stereo_target_misses,
@@ -1123,6 +1124,7 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
             drm->stereo_last_report_queue_discards = drm->stereo_queue_discards;
             drm->stereo_max_commit_callback_ns = 0;
             drm->stereo_max_draw_callback_ns = 0;
+            drm->stereo_queue_peak = 0;
             drm->stereo_max_gap = 0;
         }
     }
