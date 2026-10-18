@@ -75,6 +75,9 @@ struct egl {
 
 struct stereo_pair {
     struct gbm_bo *bo[2];
+    // Exported EGL_ANDROID_native_fence_sync descriptors for the two eyes.
+    // Zero means absent: exported fds are moved above stderr if necessary.
+    int fence_fd[2];
     uint64_t generation;
     // CPU time when BOTH eye GBM front buffers were published as a pair.
     int64_t ready_ns;
@@ -89,6 +92,13 @@ struct stereo_kms {
     // Diagnostic control: keep rendering new frames, but use only the
     // first complete pair for all KMS scanout flips.
     bool freeze_pair;
+    // Experimental nonblocking native-fence readiness gate. The EGL
+    // producer exports sync_file fds; the RT KMS worker only polls them.
+    bool native_fence;
+    PFNEGLCREATESYNCKHRPROC create_sync;
+    PFNEGLDESTROYSYNCKHRPROC destroy_sync;
+    PFNEGLCLIENTWAITSYNCKHRPROC client_wait_sync;
+    PFNEGLDUPNATIVEFENCEFDANDROIDPROC dup_native_fence_fd;
     // Wait for a completed pair to age before first KMS promotion.
     // A controlled experiment to separate fresh-BO readiness from
     // recurring display-timing problems; disabled by default.
@@ -505,6 +515,11 @@ static void stereo_align_pending(struct ra_ctx *ctx)
 // The worker never calls into EGL or GBM, avoiding cross-thread EGL use.
 static void stereo_release_pair(struct priv *p, struct stereo_pair *pair)
 {
+    // sync_file FDs are independent of GBM and safe to close on the
+    // original producer thread, after the worker has retired the pair.
+    for (int eye = 0; eye < 2; eye++)
+        if (pair->fence_fd[eye] > 0)
+            close(pair->fence_fd[eye]);
     if (pair->bo[0])
         gbm_surface_release_buffer(p->gbm.surface, pair->bo[0]);
     if (pair->bo[1])
@@ -536,6 +551,79 @@ static void stereo_drain_retired(struct ra_ctx *ctx)
     // The startup queue is used by the producer thread only.
     if (first_flip_done && p->gbm.num_bos)
         swapchain_step(ctx);
+}
+
+// Export a real fence for the GL commands preceding this call. This runs
+// solely on the EGL/render thread, after eglSwapBuffers of the current eye.
+// A zero-timeout client wait with FLUSH_COMMANDS queues the fence without
+// waiting for the GPU. Polling and closing the returned fd needs no EGL
+// context on the KMS worker.
+static int stereo_export_native_fence(struct ra_ctx *ctx)
+{
+    struct priv *p = ctx->priv;
+    struct stereo_kms *s = &p->stereo;
+    EGLSyncKHR sync = s->create_sync(p->egl.display,
+                                    EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
+    if (sync == EGL_NO_SYNC_KHR) {
+        MP_ERR(ctx, "Stereo native fence create failed (EGL error %#x)\n",
+               eglGetError());
+        return 0;
+    }
+    EGLint status = s->client_wait_sync(p->egl.display, sync,
+                                       EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, 0);
+    int fd = status != EGL_FALSE
+        ? s->dup_native_fence_fd(p->egl.display, sync) : -1;
+    EGLint egl_error = fd < 0 ? eglGetError() : EGL_SUCCESS;
+    s->destroy_sync(p->egl.display, sync);
+    if (fd < 0) {
+        MP_ERR(ctx, "Stereo native fence export failed (EGL error %#x)\n",
+               egl_error);
+        return 0;
+    }
+
+    // Pair structs are zero-initialized. Never treat stdin=0 as an
+    // absent descriptor or accidentally close another standard stream.
+    if (fd < 3) {
+        int moved = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+        close(fd);
+        fd = moved;
+    } else {
+        int flags = fcntl(fd, F_GETFD);
+        if (flags >= 0)
+            fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+    }
+    if (fd < 0) {
+        MP_ERR(ctx, "Stereo native fence FD move failed: %s\n",
+               mp_strerror(errno));
+        return 0;
+    }
+    return fd;
+}
+
+// Zero-timeout poll of both eyes on the RT worker. No EGL/GL operations
+// and no waits on GPU completion are ever performed on this thread.
+static bool stereo_pair_fences_signaled(struct vo_drm_state *drm,
+                                        const struct stereo_pair *pair)
+{
+    bool ready = true;
+    for (int eye = 0; eye < 2; eye++) {
+        if (pair->fence_fd[eye] <= 0) {
+            drm->stereo_pair_fence_errors++;
+            ready = false;
+            continue;
+        }
+        struct pollfd fd = {.fd = pair->fence_fd[eye], .events = POLLIN};
+        int rc = poll(&fd, 1, 0);
+        if (rc == 1 && (fd.revents & POLLIN)) {
+            continue;
+        } else if (rc < 0 || (rc == 1 && (fd.revents & (POLLERR | POLLNVAL)))) {
+            drm->stereo_pair_fence_errors++;
+        } else {
+            drm->stereo_pair_fence_unready_eye[eye]++;
+        }
+        ready = false;
+    }
+    return ready;
 }
 
 // Capture the submission phase relative to the previous physical vblank.
@@ -634,14 +722,33 @@ static void *stereo_kms_thread(void *arg)
               ((target_msc - drm->stereo_base_msc) & 1u)
             : 0;
 
+        // The initial generation also has to be fully rendered. Normally
+        // only executed once, before the first confirmed page flip.
+        if (s->native_fence && !drm->stereo_have_flip) {
+            drm->stereo_pair_fence_checks++;
+            if (!stereo_pair_fences_signaled(drm, &s->active)) {
+                drm->stereo_pair_fence_deferrals++;
+                pthread_mutex_unlock(&s->mutex);
+                usleep(1000);
+                continue;
+            }
+        }
         // A pair generation may be replaced only on an L boundary. Do
         // not free the old generation until the new L flip is confirmed.
         bool age_ok = s->min_pair_age_ns == 0 ||
                       (s->pending.ready_ns > 0 &&
                        mp_time_ns() - s->pending.ready_ns >=
                            s->min_pair_age_ns);
-        bool promote = eye == 0 && s->pending.bo[0] && age_ok &&
-                       s->num_retired < MP_ARRAY_SIZE(s->retired);
+        bool eligible = eye == 0 && s->pending.bo[0] && age_ok &&
+                        s->num_retired < MP_ARRAY_SIZE(s->retired);
+        bool fences_ready = true;
+        if (eligible && s->native_fence) {
+            drm->stereo_pair_fence_checks++;
+            fences_ready = stereo_pair_fences_signaled(drm, &s->pending);
+            if (!fences_ready)
+                drm->stereo_pair_fence_deferrals++;
+        }
+        bool promote = eligible && fences_ready;
         struct stereo_pair *selected = promote ? &s->pending : &s->active;
         struct framebuffer *fb = gbm_bo_get_user_data(selected->bo[eye]);
         if (!drm->active || !fb || !fb->id) {
@@ -732,6 +839,8 @@ static void *stereo_kms_thread(void *arg)
                 first_commit_logged = true;
             }
             if (promote) {
+                if (s->native_fence)
+                    drm->stereo_pair_fence_promotions++;
                 old = s->active;
                 s->active = s->pending;
                 s->pending = (struct stereo_pair){0};
@@ -936,6 +1045,17 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
             MP_ERR(ctx, "EGL stereo eye %d swap failed\n", eye);
             return;
         }
+        int fence_fd = 0;
+        if (s->native_fence) {
+            fence_fd = stereo_export_native_fence(ctx);
+            if (!fence_fd) {
+                // Never hand an unverified new buffer to KMS in this mode.
+                pthread_mutex_lock(&s->mutex);
+                drm->stereo_pair_fence_errors++;
+                pthread_mutex_unlock(&s->mutex);
+                return;
+            }
+        }
         if (eye == 1 && s->gpu_wait) {
             // EGL swap queues GPU work, but the BO can still be busy when
             // atomic KMS tries to scan it out. Experimentally wait for
@@ -957,6 +1077,8 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
         }
         struct gbm_bo *bo = gbm_surface_lock_front_buffer(surface);
         if (!bo) {
+            if (fence_fd)
+                close(fence_fd);
             MP_ERR(ctx, "Could not lock stereo eye %d GBM front buffer\n", eye);
             return;
         }
@@ -965,15 +1087,20 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
         update_framebuffer_from_bo(ctx, bo);
         struct framebuffer *fb = gbm_bo_get_user_data(bo);
         if (!fb || !fb->id) {
+            if (fence_fd)
+                close(fence_fd);
             gbm_surface_release_buffer(surface, bo);
             return;
         }
 
         pthread_mutex_lock(&s->mutex);
         if (s->building.bo[eye]) {
+            if (s->building.fence_fd[eye] > 0)
+                close(s->building.fence_fd[eye]);
             gbm_surface_release_buffer(surface, s->building.bo[eye]);
         }
         s->building.bo[eye] = bo;
+        s->building.fence_fd[eye] = fence_fd;
         if (eye == 1 && s->building.bo[0] && s->building.bo[1]) {
             s->building.generation = ++s->next_generation;
             s->building.ready_ns = mp_time_ns();
@@ -1278,6 +1405,10 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     const char *freeze_pair = getenv("MPV_DRM_STEREO_FREEZE_PAIR");
     p->stereo.freeze_pair = p->stereo.enabled && freeze_pair &&
                              strcmp(freeze_pair, "1") == 0;
+    const char *native_fence = getenv("MPV_DRM_STEREO_NATIVE_FENCE");
+    p->stereo.native_fence = p->stereo.enabled && native_fence &&
+                             strcmp(native_fence, "1") == 0;
+    drm->stereo_pair_native_fence = p->stereo.native_fence;
     const char *min_age = getenv("MPV_DRM_STEREO_MIN_PAIR_AGE_MS");
     if (p->stereo.enabled && min_age && *min_age) {
         char *end = NULL;
@@ -1431,6 +1562,35 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     }
 
     mpegl_load_functions(&p->gl, ctx->vo->log);
+    if (p->stereo.native_fence) {
+        // Require actual EGL extension support; do not silently fall back
+        // to unprotected scanout when the user requested a fence test.
+        const char *ext = eglQueryString(p->egl.display, EGL_EXTENSIONS);
+        struct stereo_kms *s = &p->stereo;
+        if (!ext || !strstr(ext, "EGL_KHR_fence_sync") ||
+            !strstr(ext, "EGL_ANDROID_native_fence_sync")) {
+            MP_ERR(ctx, "Stereo native fences require EGL_KHR_fence_sync "
+                   "and EGL_ANDROID_native_fence_sync (got: %s)\n",
+                   ext ? ext : "(unavailable)");
+            goto err;
+        }
+        s->create_sync = (PFNEGLCREATESYNCKHRPROC)
+            eglGetProcAddress("eglCreateSyncKHR");
+        s->destroy_sync = (PFNEGLDESTROYSYNCKHRPROC)
+            eglGetProcAddress("eglDestroySyncKHR");
+        s->client_wait_sync = (PFNEGLCLIENTWAITSYNCKHRPROC)
+            eglGetProcAddress("eglClientWaitSyncKHR");
+        s->dup_native_fence_fd = (PFNEGLDUPNATIVEFENCEFDANDROIDPROC)
+            eglGetProcAddress("eglDupNativeFenceFDANDROID");
+        if (!s->create_sync || !s->destroy_sync || !s->client_wait_sync ||
+            !s->dup_native_fence_fd) {
+            MP_ERR(ctx, "Stereo native fence EGL entry points unavailable\n");
+            goto err;
+        }
+        MP_INFO(ctx, "Stereo native fences enabled: EGL exports two sync_file "
+                "FDs per pair; KMS performs only nonblocking poll at "
+                "left-eye promotion; min pair age remains independent\n");
+    }
     if (p->stereo.enabled && p->gl.GetString) {
         // The GL context is now current: this reports the actual GPU
         // renderer, which need not be the card inferred from lspci.
