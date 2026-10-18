@@ -50,6 +50,9 @@
 struct gbm_frame {
     struct gbm_bo *bo;
     int stereo_eye; // -1 for ordinary frames
+    bool stereo_target_valid;
+    uint32_t stereo_target_msc;
+    int64_t stereo_draw_time_ns;
 };
 
 struct gbm {
@@ -328,6 +331,7 @@ static void queue_flip(struct ra_ctx *ctx, struct gbm_frame *frame)
     if (p->allow_modeset)
         flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
 
+    const int64_t commit_time_ns = mp_time_ns();
     int ret = drmModeAtomicCommit(drm->fd, atomic_ctx->request, flags, drm);
 
     if (ret)
@@ -335,8 +339,13 @@ static void queue_flip(struct ra_ctx *ctx, struct gbm_frame *frame)
     if (drm->stereo_test_enabled) {
         if (ret)
             drm->stereo_commit_errors++;
-        else
+        else {
             drm->stereo_flip_eye = frame->stereo_eye;
+            drm->stereo_commit_time_ns = commit_time_ns;
+            drm->stereo_commit_draw_time_ns = frame->stereo_draw_time_ns;
+            drm->stereo_commit_target_valid = frame->stereo_target_valid;
+            drm->stereo_commit_target_msc = frame->stereo_target_msc;
+        }
     }
     drm->waiting_for_flip = !ret;
     p->allow_modeset = !ret;
@@ -349,10 +358,15 @@ static void enqueue_bo(struct ra_ctx *ctx, struct gbm_bo *bo)
 {
     struct priv *p = ctx->priv;
 
-    struct gbm_frame *new_frame = talloc(p, struct gbm_frame);
+    struct vo_drm_state *drm = ctx->vo->drm;
+    struct gbm_frame *new_frame = talloc_zero(p, struct gbm_frame);
     new_frame->bo = bo;
-    new_frame->stereo_eye =
-        ctx->vo->drm->stereo_test_enabled ? ctx->vo->drm->stereo_draw_eye : -1;
+    new_frame->stereo_eye = drm->stereo_test_enabled ? drm->stereo_draw_eye : -1;
+    if (drm->stereo_test_enabled) {
+        new_frame->stereo_target_valid = drm->stereo_draw_target_valid;
+        new_frame->stereo_target_msc = drm->stereo_draw_target_msc;
+        new_frame->stereo_draw_time_ns = drm->stereo_draw_time_ns;
+    }
     MP_TARRAY_APPEND(p, p->gbm.bo_queue, p->gbm.num_bos, new_frame);
 }
 
@@ -374,6 +388,35 @@ static void swapchain_step(struct ra_ctx *ctx)
     if (p->gbm.bo_queue[0]->bo)
         gbm_surface_release_buffer(p->gbm.surface, p->gbm.bo_queue[0]->bo);
     dequeue_bo(ctx);
+}
+
+// This is a recovery fast path, not a guarantee that the next atomic
+// commit will reach the *next* vblank. Only discard buffers which are
+// neither scanned-out (index 0) nor in flight (waiting_for_flip is false).
+// Never reorder a BO behind one currently owned by KMS.
+static void stereo_align_pending(struct ra_ctx *ctx)
+{
+    struct priv *p = ctx->priv;
+    struct vo_drm_state *drm = ctx->vo->drm;
+    if (!drm->stereo_slot_mode || !drm->stereo_have_flip ||
+        drm->waiting_for_flip)
+        return;
+
+    const uint32_t expected_msc = drm->stereo_last_msc + 1u;
+    const int expected_eye = drm->stereo_base_eye ^
+                       ((expected_msc - drm->stereo_base_msc) & 1u);
+    while (p->gbm.num_bos >= 3 &&
+           p->gbm.bo_queue[1] && p->gbm.bo_queue[1]->bo &&
+           p->gbm.bo_queue[2] && p->gbm.bo_queue[2]->bo &&
+           p->gbm.bo_queue[1]->stereo_eye != expected_eye &&
+           p->gbm.bo_queue[2]->stereo_eye == expected_eye) {
+        // Drop the stale waiting frame, but retain the current scanout.
+        struct gbm_frame *obsolete = p->gbm.bo_queue[1];
+        gbm_surface_release_buffer(p->gbm.surface, obsolete->bo);
+        talloc_free(obsolete);
+        MP_TARRAY_REMOVE_AT(p, p->gbm.bo_queue, p->gbm.num_bos, 1);
+        drm->stereo_queue_discards++;
+    }
 }
 
 static void drm_egl_swap_buffers(struct ra_ctx *ctx)
@@ -411,8 +454,12 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
             swapchain_step(ctx);
             continue;
         }
-        queue_flip(ctx, p->gbm.bo_queue[1]);
+        stereo_align_pending(ctx);
+        if (p->gbm.num_bos > 1)
+            queue_flip(ctx, p->gbm.bo_queue[1]);
     }
+    if (drm->stereo_test_enabled)
+        drm->stereo_queue_ahead = p->gbm.num_bos > 0 ? p->gbm.num_bos - 1 : 0;
     drm->redraw = false;
 }
 
