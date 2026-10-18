@@ -633,7 +633,20 @@ bool vo_drm_stereo_pair_can_capture(struct ra_ctx *ctx)
                      gbm_surface_has_free_buffers(s->right_gbm);
     if (!available) {
         pthread_mutex_lock(&s->mutex);
-        ctx->vo->drm->stereo_pair_update_skips++;
+        // A prior partial capture is never eligible for scanout.
+        if (s->building.bo[0] || s->building.bo[1])
+            stereo_release_pair(p, &s->building);
+        // If necessary, drop an unpublished pending generation to free
+        // buffers. Its BOs are not owned by KMS until the worker moves
+        // the pair to active (under this same mutex).
+        if ((!gbm_surface_has_free_buffers(p->gbm.surface) ||
+             !gbm_surface_has_free_buffers(s->right_gbm)) &&
+            s->pending.bo[0])
+            stereo_release_pair(p, &s->pending);
+        available = gbm_surface_has_free_buffers(p->gbm.surface) &&
+                    gbm_surface_has_free_buffers(s->right_gbm);
+        if (!available)
+            ctx->vo->drm->stereo_pair_update_skips++;
         pthread_mutex_unlock(&s->mutex);
     }
     return available;
