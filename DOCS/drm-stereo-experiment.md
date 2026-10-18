@@ -534,3 +534,33 @@ thread to obtain fresh source frames; the KMS worker alone owns the
 and decoder stalls require further stress tests. A page-flip callback
 is not a measurement of when LCD pixels or shutter lenses respond.
 No physical stereo accuracy has been demonstrated yet.
+
+
+### First paired KMS smoke-test failure: no scanout
+
+The first `MPV_DRM_STEREO_PAIR=1` test on the user's AMD/Arch
+hardware started VA-API video and PipeWire audio but showed a black
+screen and repeatedly logged:
+
+```
+[vo/gpu/opengl] Stereo KMS atomic flip failed: Success
+```
+
+No `DRM SBS test` callbacks were logged, and mpv's A-V drift grew
+while the KMS scanout worker made no successful page flips.
+
+**Root cause found in the source:** the new worker used a short-circuit
+property chain requiring `ZPOS` to be set successfully before calling
+`drmModeAtomicCommit`. `drm_object_set_property` returns
+`-EINVAL` for absent or immutable properties without setting `errno`.
+The original mpv `queue_flip` does not require `ZPOS` to succeed.
+Thus a missing/immutable `ZPOS` prevented the atomic submit entirely,
+while `mp_strerror(errno)` misleadingly printed "Success".
+
+**Fix:** require `FB_ID` and `CRTC_ID` only; attempt but ignore
+failure on optional `ZPOS`. Track the return status of property
+setup and a separate errno for `drmModeAtomicCommit` failures. The
+new diagnostic prints `fb_prop`, `crtc_prop`, `commit_rc` and
+`errno`. Log the first successfully submitted eye/FB/generation.
+Stop the KMS worker after 60 consecutive failed commits to avoid
+endless busy retries. This fix still needs hardware validation.
