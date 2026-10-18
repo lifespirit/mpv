@@ -1283,3 +1283,58 @@ confidence.
 
 The new optional A/B control has not been compiled or tested
 on the user's Intel i915 host.
+
+
+### Twelfth run: continuous rendering / first stereo pair frozen (103 s)
+
+The user ran `MPV_DRM_STEREO_FREEZE_PAIR=1` and stopped
+manually with Ctrl+C. The video starts on black frames, so
+the scanout picture was black: this does **not** invalidate the
+A/B result, since KMS holds the **first** pair by design.
+The reported counters independently verify active production:
+`draws=4942`, `pair_renders=2471`, while the core
+advanced to movie PTS ~00:01:43 and did not pause.
+
+The last report covered 12,360 KMS confirmations (~103s) at
+119.996 Hz, and showed `pair_gen=1`,
+`first_eye_L=1 first_eye_R=1`, zero missed vblanks,
+zero parity/eye/hold errors, zero pair update skips and zero
+atomic commit errors. Thus the same Intel i915/GL renderer
+can process/submit roughly 24 new pairs per second while the
+KMS worker alternates a fixed pair at ~120Hz with no misses.
+
+This is substantially stronger evidence than the earlier
+38-second pause experiment that fresh KMS BO presentation
+and/or associated handoff is implicated, rather than generic
+steady producer-side GPU load. It does not prove the implicit
+fence is the culprit: unlike the normal mode, the fixed-pair
+case never references newly finished buffers from KMS.
+Careful longer A/B comparisons are still warranted because
+the normal failure process is rare and possibly clustered.
+
+For visual verification of this mode, start playback from a
+nonblack timestamp e.g. `--start=00:01:00`. The first pair
+is still frozen; rendering and decoding continue beyond it.
+
+New targeted diagnostic: `MPV_DRM_STEREO_MIN_PAIR_AGE_MS=N`,
+valid `0..32`, default `0`. With `FREEZE_PAIR=0`, the
+independent KMS worker may promote a new pending stereo
+pair only at an L boundary and after the pair has been
+published for at least `N` milliseconds. If the pending
+pair is too young, KMS continues alternating the old pair
+until a subsequent L boundary; the producer may replace the
+pending pair in the meantime. This deliberately increases
+frame-to-scanout latency while leaving actual 120Hz
+L/R alternation and regular producer-side rendering active.
+`MIN_PAIR_AGE_MS=25` is an initial comparison point:
+the two missed right-eye first scanouts in run 11 involved
+pairs aged only ~15.2-15.4ms at R submission. If ageing
+reduces errors, buffer readiness / first-use scheduling
+becomes more plausible; if not, look for i915 atomic
+commit/fence timing. Do not regard this as a final solution
+without an A/B run and video-sync analysis.
+
+No kernel, EGL or GL synchronization guarantees derive
+from simply holding a BO for 25ms; age gating is an
+experimental diagnostic, **not** a synchronization primitive.
+The new source has not been compiled on the target laptop.
