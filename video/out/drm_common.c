@@ -1032,7 +1032,7 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
         if (drm->stereo_flip_eye != expected_eye)
             ++drm->stereo_absolute_eye_errors;
 
-        if (drm->stereo_slot_mode) {
+        if (drm->stereo_slot_mode || drm->stereo_pair_mode) {
             if (drm->stereo_commit_target_valid &&
                 drm->stereo_commit_target_msc != msc)
                 ++drm->stereo_target_misses;
@@ -1090,6 +1090,7 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     "max_commit_callback_ms=%.3f max_draw_callback_ms=%.3f "
                     "pair=%s pair_gen=%llu pair_renders=%llu "
                     "pair_reuse_flips=%llu pair_update_skips=%llu "
+                    "pair_seq=%s pair_catchups=%llu "
                     "draws=%llu commit_errors=%llu msc=%u eye=%s "
                     "(video output only; USB disabled)\n",
                     (unsigned long long)drm->stereo_flips, shown_hz,
@@ -1119,6 +1120,8 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     (unsigned long long)drm->stereo_pair_rendered,
                     (unsigned long long)drm->stereo_pair_repeated_flips,
                     (unsigned long long)drm->stereo_pair_update_skips,
+                    drm->stereo_pair_sequence_mode ? "on" : "off",
+                    (unsigned long long)drm->stereo_pair_sequence_catchups,
                     (unsigned long long)drm->stereo_draws,
                     (unsigned long long)drm->stereo_commit_errors, msc,
                     drm->stereo_flip_eye ? "R" : "L");
