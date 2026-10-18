@@ -1118,10 +1118,15 @@ err:
 
 static bool drm_egl_reconfig(struct ra_ctx *ctx)
 {
+    struct priv *p = ctx->priv;
     struct vo_drm_state *drm = ctx->vo->drm;
-    ctx->vo->dwidth  = drm->fb->width;
-    ctx->vo->dheight = drm->fb->height;
-    ra_gl_ctx_resize(ctx->swapchain, drm->fb->width, drm->fb->height, 0);
+    // The paired producer locks/recycles BOs. Never depend on a cached
+    // drm->fb pointer whose owning GBM surface may already have recycled it.
+    int width = p->stereo.enabled ? p->draw_surface_size.width : drm->fb->width;
+    int height = p->stereo.enabled ? p->draw_surface_size.height : drm->fb->height;
+    ctx->vo->dwidth = width;
+    ctx->vo->dheight = height;
+    ra_gl_ctx_resize(ctx->swapchain, width, height, 0);
     return true;
 }
 
