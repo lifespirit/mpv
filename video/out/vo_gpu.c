@@ -38,6 +38,7 @@
 #include "gpu/context.h"
 #include "gpu/hwdec.h"
 #include "gpu/video.h"
+#include "drm_common.h"
 
 struct gpu_priv {
     struct mp_log *log;
@@ -48,6 +49,10 @@ struct gpu_priv {
     struct gl_video *renderer;
 
     int events;
+
+    // Experimental --vo=gpu --gpu-context=drm SBS alternation, no USB.
+    bool stereo_test;
+    uint64_t stereo_draw_count;
 };
 static void resize(struct vo *vo)
 {
@@ -60,6 +65,9 @@ static void resize(struct vo *vo)
     struct mp_osd_res osd;
     vo_get_src_dst_rects(vo, &src, &dst, &osd);
 
+    // The first eye will be selected by the first draw_frame() call.
+    // Do not half the viewport in the global aspect calculation; each
+    // half-SBS eye is expanded into the entire destination rectangle.
     gl_video_resize(p->renderer, &src, &dst, &osd);
 
     int fb_depth = sw->fns->color_depth ? sw->fns->color_depth(sw) : 0;
@@ -78,6 +86,25 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     struct ra_fbo fbo;
     if (!sw->fns->start_frame(sw, &fbo))
         return VO_FALSE;
+
+    if (p->stereo_test && frame->current) {
+        struct mp_rect src, dst;
+        struct mp_osd_res osd;
+        vo_get_src_dst_rects(vo, &src, &dst, &osd);
+        // The experimental mode accepts *half* SBS with no 90/270-degree
+        // rotation. mpv's regular full-image aspect determines the output
+        // viewport, while the source region selects just one eye.
+        const int mid = src.x0 + (src.x1 - src.x0) / 2;
+        const int eye = p->stereo_draw_count & 1;
+        if (eye == 0)
+            src.x1 = mid;
+        else
+            src.x0 = mid;
+        gl_video_resize(p->renderer, &src, &dst, &osd);
+        vo->drm->stereo_draw_eye = eye;
+        ++vo->drm->stereo_draws;
+        ++p->stereo_draw_count;
+    }
 
     gl_video_render_frame(p->renderer, frame, &fbo, RENDER_FRAME_DEF);
     if (!sw->fns->submit_frame(sw, frame)) {
@@ -124,6 +151,11 @@ static int reconfig(struct vo *vo, struct mp_image_params *params)
         return -1;
 
     resize(vo);
+    if (p->stereo_test && (params->w < 2 || (params->w & 1)
+                            || params->rotate % 180)) {
+        MP_ERR(vo, "DRM stereo test requires even-width, unrotated SBS frames\n");
+        return -1;
+    }
     gl_video_config(p->renderer, params);
 
     return 0;
@@ -305,6 +337,27 @@ static int preinit(struct vo *vo)
         goto err_out;
     mp_assert(p->ctx->ra);
     mp_assert(p->ctx->swapchain);
+
+    // Only the direct DRM/EGL backend can provide KMS flip events.
+    // This is deliberately not a generic Wayland/X11 stereo mode.
+    const char *stereo_env = getenv("MPV_DRM_STEREO_SBS");
+    p->stereo_test = stereo_env && strcmp(stereo_env, "1") == 0;
+    if (p->stereo_test) {
+        if (strcmp(p->ctx->fns->name, "drm") != 0 || !vo->drm) {
+            MP_ERR(vo, "MPV_DRM_STEREO_SBS=1 requires --gpu-context=drm\n");
+            goto err_out;
+        }
+        double hz = vo_drm_get_display_fps(vo->drm);
+        if (fabs(hz - 120.0) > 0.25) {
+            MP_ERR(vo, "DRM stereo test requires a 120 Hz output (got %.3f)\n", hz);
+            goto err_out;
+        }
+        vo->drm->stereo_test_enabled = true;
+        vo->drm->stereo_draw_eye = -1;
+        vo->drm->stereo_flip_eye = -1;
+        vo->drm->stereo_last_eye = -1;
+        MP_INFO(vo, "Experimental DRM SBS L/R alternation at %.3f Hz (NO USB)\n", hz);
+    }
 
     p->renderer = gl_video_init(p->ctx->ra, vo->log, vo->global);
     gl_video_set_osd_source(p->renderer, vo->osd);
