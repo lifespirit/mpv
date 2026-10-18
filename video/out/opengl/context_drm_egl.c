@@ -89,6 +89,10 @@ struct stereo_kms {
     // Diagnostic control: keep rendering new frames, but use only the
     // first complete pair for all KMS scanout flips.
     bool freeze_pair;
+    // Wait for a completed pair to age before first KMS promotion.
+    // A controlled experiment to separate fresh-BO readiness from
+    // recurring display-timing problems; disabled by default.
+    int64_t min_pair_age_ns;
     pthread_mutex_t mutex;
     pthread_cond_t ready;
     pthread_cond_t flip_ready;
@@ -632,7 +636,11 @@ static void *stereo_kms_thread(void *arg)
 
         // A pair generation may be replaced only on an L boundary. Do
         // not free the old generation until the new L flip is confirmed.
-        bool promote = eye == 0 && s->pending.bo[0] &&
+        bool age_ok = s->min_pair_age_ns == 0 ||
+                      (s->pending.ready_ns > 0 &&
+                       mp_time_ns() - s->pending.ready_ns >=
+                           s->min_pair_age_ns);
+        bool promote = eye == 0 && s->pending.bo[0] && age_ok &&
                        s->num_retired < MP_ARRAY_SIZE(s->retired);
         struct stereo_pair *selected = promote ? &s->pending : &s->active;
         struct framebuffer *fb = gbm_bo_get_user_data(selected->bo[eye]);
@@ -1270,6 +1278,19 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     const char *freeze_pair = getenv("MPV_DRM_STEREO_FREEZE_PAIR");
     p->stereo.freeze_pair = p->stereo.enabled && freeze_pair &&
                              strcmp(freeze_pair, "1") == 0;
+    const char *min_age = getenv("MPV_DRM_STEREO_MIN_PAIR_AGE_MS");
+    if (p->stereo.enabled && min_age && *min_age) {
+        char *end = NULL;
+        errno = 0;
+        long ms = strtol(min_age, &end, 10);
+        if (!errno && end != min_age && *end == '\0' &&
+            ms >= 0 && ms <= 32) {
+            p->stereo.min_pair_age_ns = (int64_t)ms * 1000000LL;
+        } else {
+            MP_WARN(ctx, "Invalid MPV_DRM_STEREO_MIN_PAIR_AGE_MS='%s' "
+                    "(valid range 0..32; using 0)\n", min_age);
+        }
+    }
     drm->stereo_pair_sequence_mode = p->stereo.sequence_mode;
     drm->stereo_pair_gpu_wait = p->stereo.gpu_wait;
     if (p->stereo.enabled) {
@@ -1311,6 +1332,10 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     if (p->stereo.freeze_pair)
         MP_INFO(ctx, "Stereo freeze-pair A/B: rendering continues but "
                 "only generation 1 will be submitted to KMS\n");
+    if (p->stereo.min_pair_age_ns)
+        MP_INFO(ctx, "Stereo pair minimum age before KMS promotion: "
+                "%lld ms (A/B diagnostic; additional video latency)\n",
+                (long long)(p->stereo.min_pair_age_ns / 1000000LL));
     p->stereo.capture_eye = -1;
     if (p->stereo.enabled) {
         int err = pthread_mutex_init(&p->stereo.mutex, NULL);
