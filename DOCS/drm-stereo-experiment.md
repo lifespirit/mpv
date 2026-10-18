@@ -437,3 +437,100 @@ render-pair generation ID. The monitor's `119.998 Hz` is not
 `120.000 Hz` and should also be the eventual timing reference for
 the USB/IR emitter. **No new independent scheduler is implemented
 yet; this is a design note based on the experimental runs.**
+
+## Seventh experiment: dual-eye framebuffer producer + independent KMS scanout
+
+Branch: `feature/drm-stereo-dual-scanout` (the v2 branch is untouched).
+
+This is an **experimental, unvalidated architecture**. Its source has not
+yet been compiled/run on the target Arch/AMD DRM system. USB emitter
+support remains **disabled**.
+
+Enable with `MPV_DRM_STEREO_SBS=1 MPV_DRM_STEREO_PAIR=1`.
+The older `MPV_DRM_STEREO_SLOT=1` and software recovery are
+automatically bypassed in this mode.
+
+### Producer
+
+- DRM/EGL creates **two** GBM/EGL window surfaces with the same dimensions
+  and format, one for L and one for R, using the same rendering GL context.
+- The mpv VO thread checks `frame->frame_id`: on every *new* decoded SBS
+  source frame, it binds and renders L, swaps/locks its GBM BO, then binds
+  and renders R, swaps/locks its GBM BO and publishes the complete pair.
+- Repeated display-resample frame callbacks do **no GL draws**. The
+  dedicated KMS worker keeps presenting the previous complete pair.
+- If a GBM surface has no free capture buffer, the producer skips the
+  update rather than blocking the KMS worker. An incomplete pair is never
+  published. `pair_update_skips` counts these attempts.
+
+### Consumer
+
+- A dedicated pthread is the only DRM page-flip event consumer in pair
+  mode. It submits `DRM_MODE_ATOMIC_NONBLOCK |
+  DRM_MODE_PAGE_FLIP_EVENT` on the draw plane and waits for the true KMS
+  page-flip callback. It uses `last_msc + 1` parity to choose the eye,
+  anchored to the first L callback; exact actual MSC is validated by the
+  original diagnostics.
+- The worker uses already-created FB IDs from the captured BOs. It
+  never calls EGL or GBM and never renders video.
+- Source generations are switched only at an L slot, and only after
+  *both* new eye BOs are ready. Older active BOs are retired **after**
+  the new flip's callback, never when a submit was merely requested.
+  The VO thread eventually releases retired GBM surface locks. The
+  active pair is reused until the next complete generation is available.
+- The worker stops and is joined before the original DRM master state
+  is restored or EGL/GBM is destroyed. The DRM fd stays open through
+  GBM cleanup.
+
+### Diagnostics
+
+The existing `DRM SBS test` counters remain authoritative for the
+physical output, especially `window_missed`, `window_wrong_eye`
+and `window_wrong_hold`. Extra counters:
+
+- `pair=on`: confirms the independent worker mode;
+- `pair_gen`: currently displayed L/R pair generation;
+- `pair_renders`: number of complete L/R pairs published by the producer;
+- `pair_reuse_flips`: flips that reused the active pair rather than
+  adopting a new one;
+- `pair_update_skips`: producer attempted an update but no free
+  GBM capture BO was available.
+
+A ~23.976 fps source should normally yield ~24 complete pair renders
+per second and ~120 confirmed KMS flips per second. A stable movie
+frame continues alternating eyes across decoder/GL stalls. Count
+late or missing hardware flips from MSC, **not** from mpv's OSD
+`DS` rate or the nominal 120 Hz mode.
+
+### Build and smoke test
+
+```sh
+git fetch origin
+git switch feature/drm-stereo-dual-scanout
+git pull --ff-only
+meson compile -C build
+
+MPV_DRM_STEREO_SBS=1 MPV_DRM_STEREO_PAIR=1 \
+./build/mpv --no-config --vo=gpu --gpu-context=drm \
+    --drm-connector=DP-1 --drm-mode=2560x1440@120 \
+    --drm-vrr-enabled=no --video-sync=display-resample \
+    --interpolation=no --swapchain-depth=3 --hwdec=auto \
+    "/path/to/half-sbs-video.mkv" \
+    2>&1 | tee /tmp/mpv-drm-stereo-pair-depth3.log
+```
+
+Start with a **short 10–15 second smoke test**, exit using `q`,
+inspect `pair=on`, increasing `pair_gen`, `pair_renders`,
+`pair_reuse_flips`, and confirm that `flips` is approaching
+119.998 Hz. Then run for 90–120 seconds and collect the full log.
+Keep the USB/IR emitter disconnected.
+
+**Known limitations**: initial L/R anchor is based on the first
+confirmed flip, not measured optical shutter timing. EGL reuse
+synchronizes through GBM/KMS implicit fences (not explicit output
+fences). The paired producer still uses the mpv display-synced VO
+thread to obtain fresh source frames; the KMS worker alone owns the
+120 Hz scanout cadence. VT switching, HDR reconfiguration, seeks,
+and decoder stalls require further stress tests. A page-flip callback
+is not a measurement of when LCD pixels or shutter lenses respond.
+No physical stereo accuracy has been demonstrated yet.
