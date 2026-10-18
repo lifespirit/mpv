@@ -1690,3 +1690,87 @@ real-time thread;
 driving active shutter glasses by USB. There is no
 evidence from this run that increasing the age gate
 beyond 25ms is necessary.
+
+
+### Nineteenth experiment: opt-in EGL native-fence readiness gate
+
+After the 15-minute zero-miss 25ms age-gated run,
+`video/out/opengl/context_drm_egl.c` now has an
+experimental **`MPV_DRM_STEREO_NATIVE_FENCE=1`** mode.
+It does **not** change behavior unless explicitly enabled.
+It requires both `EGL_KHR_fence_sync` and
+`EGL_ANDROID_native_fence_sync` and their KHR/ANDROID
+entry points; when these are missing, mpv **fails
+initialization** with an explanatory log, rather than
+silently testing unsynchronized buffers.
+
+After each eye's `eglSwapBuffers`, the EGL producer:
+- creates an `EGL_SYNC_NATIVE_FENCE_ANDROID` EGL sync;
+- issues a zero-timeout `eglClientWaitSyncKHR` with
+  `EGL_SYNC_FLUSH_COMMANDS_BIT_KHR` to submit work
+  without waiting for completion;
+- obtains a `sync_file` descriptor with
+  `eglDupNativeFenceFDANDROID`; destroys the EGL
+  object but retains the independent duplicated FD;
+- publishes the two eye BOs **alongside** both FDs.
+
+The RT KMS worker does not call EGL/GL or wait for GPU
+execution. For the first pair and at eligible left-eye
+promotion boundaries, it calls `poll(fd, ..., 0)` for
+**both** native fences. If either is unsignaled it
+keeps reusing the previous already-presented pair and
+retries at the next left boundary. This is a
+**nonblocking fence readiness gate**, not a pass-through
+`IN_FENCE_FD` atomic property. FDs are closed when
+the owning pair is superseded, retired, or destroyed.
+
+Both gating methods can be used together: the configured
+`MIN_PAIR_AGE_MS=N` remains an independent lower bound.
+The existing proven 25ms age gate is deliberately still
+available as a safety fallback; `NATIVE_FENCE=0` leaves
+prior behavior unchanged.
+
+Six cumulative diagnostics were added to each
+`DRM SBS test` report:
+`native_fence=on/off`, `fence_checks`,
+`fence_promotions`, `fence_deferrals`,
+`fence_unready_L`, `fence_unready_R`,
+`fence_errors` (six counters plus the mode flag).
+A nonzero error counter invalidates a zero-miss result.
+
+**Controlled A/B sequence:**
+1. On the test host, `git pull --ff-only` and
+   `meson compile -C build` (these changes have not
+   been compiled/tested on the Intel laptop yet).
+   Baseline: `FREEZE_PAIR=0`, `GPU_WAIT=0`,
+   `NATIVE_FENCE=1`, `MIN_PAIR_AGE_MS=25` for
+   ~2 minutes. Confirm extension detection and
+   `fence_errors=0`; the age gate stays intact.
+2. If native fences are available and clean, run
+   `NATIVE_FENCE=1`, `MIN_PAIR_AGE_MS=0`,
+   `FREEZE_PAIR=0` for **10-15 minutes**.
+   Observe `fence_deferrals`, the individual
+   unready-eye counters, frequency, misses and
+   whether frame cadence/PTS changes. This isolates
+   GPU fence completion from arbitrary time delay.
+3. Compare with existing no-fence 0ms and age-gated
+   16ms/25ms runs. If zero-time polling alone still
+   misses first-right scanouts, that suggests GPU
+   command-stream fence completion is not identical
+   to i915's first-use FB readiness. Potential next
+   probes: atomic `IN_FENCE_FD`, plane constraints,
+   explicit sync for video decode/render dependencies,
+   or kernel traces of the first right-eye flip.
+
+This first mode verifies EGL command completion before
+allowing an entire *pair* to scan out. It does **not**
+guarantee that the i915 plane can latch a newly
+rendered BO by the next vblank: the kernel has its
+own implicit dependencies and memory/display setup,
+and zero-time FD polling does not serialize them.
+No added video presentation latency has yet been
+measured against wall-clock optical output.
+
+**Do not attach/drive shutter glasses** based solely
+on a successful two-minute experiment: test longer
+runs and recover phase on missed hardware refreshes.
