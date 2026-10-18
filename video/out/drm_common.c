@@ -1101,6 +1101,7 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     "pair=%s pair_gen=%llu pair_renders=%llu "
                     "pair_reuse_flips=%llu pair_update_skips=%llu "
                     "pair_seq=%s pair_catchups=%llu "
+                    "gpu_wait=%s gpu_waits=%llu max_gpu_wait_ms=%.3f "
                     "draws=%llu commit_errors=%llu msc=%u eye=%s "
                     "(video output only; USB disabled)\n",
                     (unsigned long long)drm->stereo_flips, shown_hz,
@@ -1133,6 +1134,9 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     (unsigned long long)drm->stereo_pair_update_skips,
                     drm->stereo_pair_sequence_mode ? "on" : "off",
                     (unsigned long long)drm->stereo_pair_sequence_catchups,
+                    drm->stereo_pair_gpu_wait ? "on" : "off",
+                    (unsigned long long)drm->stereo_pair_gpu_waits,
+                    drm->stereo_max_gpu_wait_ns / 1000000.0,
                     (unsigned long long)drm->stereo_draws,
                     (unsigned long long)drm->stereo_commit_errors, msc,
                     drm->stereo_flip_eye ? "R" : "L");
@@ -1146,6 +1150,7 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
             drm->stereo_max_commit_callback_ns = 0;
             drm->stereo_max_draw_callback_ns = 0;
             drm->stereo_max_submit_after_callback_ns = 0;
+            drm->stereo_max_gpu_wait_ns = 0;
             drm->stereo_queue_peak = 0;
             drm->stereo_max_gap = 0;
         }
