@@ -86,6 +86,9 @@ struct stereo_kms {
     bool rt_mode;
     bool gpu_wait;
     bool legacy_mode;
+    // Diagnostic control: keep rendering new frames, but use only the
+    // first complete pair for all KMS scanout flips.
+    bool freeze_pair;
     pthread_mutex_t mutex;
     pthread_cond_t ready;
     pthread_cond_t flip_ready;
@@ -966,6 +969,19 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
         if (eye == 1 && s->building.bo[0] && s->building.bo[1]) {
             s->building.generation = ++s->next_generation;
             s->building.ready_ns = mp_time_ns();
+            if (s->freeze_pair && s->active.bo[0]) {
+                // A/B isolation test: preserve producer-side GPU load
+                // (decode + rendering of BOTH stereo eyes), but never
+                // give a newly rendered GBM BO to KMS. Only the initial
+                // pair is scanned out, exactly as during pause. This
+                // control distinguishes first BO presentation/fences
+                // from generic contention caused by video rendering.
+                stereo_release_pair(p, &s->building);
+                s->building = (struct stereo_pair){0};
+                drm->stereo_pair_rendered++;
+                pthread_mutex_unlock(&s->mutex);
+                return;
+            }
             if (!s->active.bo[0]) {
                 s->active = s->building;
             } else {
@@ -1251,6 +1267,9 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     const char *gpu_wait = getenv("MPV_DRM_STEREO_GPU_WAIT");
     p->stereo.gpu_wait = p->stereo.enabled && gpu_wait &&
                          strcmp(gpu_wait, "1") == 0;
+    const char *freeze_pair = getenv("MPV_DRM_STEREO_FREEZE_PAIR");
+    p->stereo.freeze_pair = p->stereo.enabled && freeze_pair &&
+                             strcmp(freeze_pair, "1") == 0;
     drm->stereo_pair_sequence_mode = p->stereo.sequence_mode;
     drm->stereo_pair_gpu_wait = p->stereo.gpu_wait;
     if (p->stereo.enabled) {
@@ -1289,6 +1308,9 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     if (p->stereo.gpu_wait)
         MP_INFO(ctx, "Stereo paired GPU completion wait enabled "
                 "(eglWaitClient after right-eye EGL swap)\n");
+    if (p->stereo.freeze_pair)
+        MP_INFO(ctx, "Stereo freeze-pair A/B: rendering continues but "
+                "only generation 1 will be submitted to KMS\n");
     p->stereo.capture_eye = -1;
     if (p->stereo.enabled) {
         int err = pthread_mutex_init(&p->stereo.mutex, NULL);
