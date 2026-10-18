@@ -203,11 +203,19 @@ struct vo_drm_state {
     // Phase diagnostics: DRM UST timestamps must use CLOCK_MONOTONIC.
     // This is verified using DRM_CAP_TIMESTAMP_MONOTONIC on the CRTC fd.
     bool stereo_ust_monotonic;
+    bool stereo_callback_lag_valid;
+    bool stereo_prev_callback_lag_valid;
+    bool stereo_submit_after_ust_valid;
+    // Signed measurements are preserved even if kernel UST is ahead of
+    // clock_gettime(CLOCK_MONOTONIC). Never use -1 ns as an error sentinel.
     int64_t stereo_last_callback_lag_ns;
     int64_t stereo_prev_callback_lag_ns;
     int64_t stereo_submit_after_ust_ns;
+    int64_t stereo_min_callback_lag_ns;
     int64_t stereo_max_callback_lag_ns;
+    int64_t stereo_min_submit_after_ust_ns;
     int64_t stereo_max_submit_after_ust_ns;
+    uint64_t stereo_negative_callback_lags;
 
     // Opt-in dual-surface producer / independent DRM vblank scanout.
     // Stereo pair operations are implemented by the drm EGL context.
