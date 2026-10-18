@@ -49,6 +49,7 @@
 
 struct gbm_frame {
     struct gbm_bo *bo;
+    int stereo_eye; // -1 for ordinary frames
 };
 
 struct gbm {
@@ -331,6 +332,12 @@ static void queue_flip(struct ra_ctx *ctx, struct gbm_frame *frame)
 
     if (ret)
         MP_WARN(ctx->vo, "Failed to commit atomic request: %s\n", mp_strerror(ret));
+    if (drm->stereo_test_enabled) {
+        if (ret)
+            drm->stereo_commit_errors++;
+        else
+            drm->stereo_flip_eye = frame->stereo_eye;
+    }
     drm->waiting_for_flip = !ret;
     p->allow_modeset = !ret;
 
@@ -344,6 +351,8 @@ static void enqueue_bo(struct ra_ctx *ctx, struct gbm_bo *bo)
 
     struct gbm_frame *new_frame = talloc(p, struct gbm_frame);
     new_frame->bo = bo;
+    new_frame->stereo_eye =
+        ctx->vo->drm->stereo_test_enabled ? ctx->vo->drm->stereo_draw_eye : -1;
     MP_TARRAY_APPEND(p, p->gbm.bo_queue, p->gbm.num_bos, new_frame);
 }
 
