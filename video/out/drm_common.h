@@ -175,6 +175,7 @@ struct vo_drm_state {
     // Count frames queued *after* the currently scanned-out GBM buffer.
     bool stereo_slot_mode;
     unsigned stereo_queue_ahead;
+    unsigned stereo_queue_peak;
     uint32_t stereo_draw_target_msc;
     bool stereo_draw_target_valid;
     int64_t stereo_draw_time_ns;
