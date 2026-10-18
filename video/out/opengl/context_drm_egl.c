@@ -760,31 +760,63 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
 static void drm_egl_uninit(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv;
+    if (p && p->stereo.initialized) {
+        struct stereo_kms *s = &p->stereo;
+        pthread_mutex_lock(&s->mutex);
+        s->stop = true;
+        pthread_cond_broadcast(&s->ready);
+        pthread_mutex_unlock(&s->mutex);
+        if (s->started)
+            pthread_join(s->thread, NULL);
+    }
+
+    // Stop referencing the BOs on the display before releasing the GBM
+    // surface locks or destroying the DRM framebuffers.
+    if (p && p->stereo.enabled && ctx->vo->drm)
+        vo_drm_release_crtc(ctx->vo->drm);
+
     ra_gl_ctx_uninit(ctx);
-    vo_drm_uninit(ctx->vo);
 
     if (p) {
-        // According to GBM documentation all BO:s must be released
-        // before gbm_surface_destroy can be called on the surface.
-        while (p->gbm.num_bos) {
+        struct stereo_kms *s = &p->stereo;
+        if (s->initialized) {
+            stereo_release_pair(p, &s->building);
+            stereo_release_pair(p, &s->pending);
+            stereo_release_pair(p, &s->active);
+            for (unsigned i = 0; i < s->num_retired; i++)
+                stereo_release_pair(p, &s->retired[i]);
+            s->num_retired = 0;
+            pthread_cond_destroy(&s->ready);
+            pthread_mutex_destroy(&s->mutex);
+        }
+        // All locked front buffers must be released before destruction.
+        while (p->gbm.num_bos)
             swapchain_step(ctx);
-        }
 
-        eglMakeCurrent(p->egl.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                       EGL_NO_CONTEXT);
         if (p->egl.display != EGL_NO_DISPLAY) {
-            eglDestroySurface(p->egl.display, p->egl.surface);
-            eglDestroyContext(p->egl.display, p->egl.context);
+            eglMakeCurrent(p->egl.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                           EGL_NO_CONTEXT);
+            if (s->right_egl != EGL_NO_SURFACE)
+                eglDestroySurface(p->egl.display, s->right_egl);
+            if (p->egl.surface != EGL_NO_SURFACE)
+                eglDestroySurface(p->egl.display, p->egl.surface);
+            if (p->egl.context != EGL_NO_CONTEXT)
+                eglDestroyContext(p->egl.display, p->egl.context);
         }
+        if (s->right_gbm)
+            gbm_surface_destroy(s->right_gbm);
         if (p->gbm.surface)
             gbm_surface_destroy(p->gbm.surface);
-        eglTerminate(p->egl.display);
+        if (p->egl.display != EGL_NO_DISPLAY)
+            eglTerminate(p->egl.display);
         if (p->gbm.device)
             gbm_device_destroy(p->gbm.device);
-
         if (p->drm_params.render_fd != -1)
             close(p->drm_params.render_fd);
     }
+
+    // The DRM fd must outlive all gbm_bo framebuffer destroy callbacks.
+    vo_drm_uninit(ctx->vo);
 }
 
 // If the draw plane supports ARGB we want to use that, but if it doesn't we
