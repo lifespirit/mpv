@@ -78,8 +78,11 @@ struct stereo_pair {
     // Exported EGL_ANDROID_native_fence_sync descriptors for the two eyes.
     // Zero means absent: exported fds are moved above stderr if necessary.
     int fence_fd[2];
-    // Number of L-boundary attempts with unsignaled GPU work.
+    // Number and ages of L-boundary attempts with unsignaled GPU work.
     unsigned fence_deferrals;
+    int64_t first_fence_deferral_age_ns;
+    int64_t last_fence_deferral_age_ns;
+    uint32_t last_fence_deferral_msc;
     uint64_t generation;
     // CPU time when BOTH eye GBM front buffers were published as a pair.
     int64_t ready_ns;
@@ -639,11 +642,18 @@ static void stereo_note_unpresented_pair(struct ra_ctx *ctx,
             "reason=%s count=%llu pending_gen=%llu active_gen=%llu "
             "pending_age_ms=%.3f fence_L=%d fence_R=%d "
             "left_boundary_fence_deferrals=%u "
+            "first_deferral_age_ms=%.3f last_deferral_age_ms=%.3f "
+            "last_deferral_target_msc=%u "
             "(fence: 1=signaled 0=unsignaled -1=unavailable)\n",
             reason, (unsigned long long)count,
             (unsigned long long)pair->generation,
             (unsigned long long)s->active.generation,
-            age_ms, left, right, pair->fence_deferrals);
+            age_ms, left, right, pair->fence_deferrals,
+            pair->fence_deferrals
+                ? pair->first_fence_deferral_age_ns / 1000000.0 : -1.0,
+            pair->fence_deferrals
+                ? pair->last_fence_deferral_age_ns / 1000000.0 : -1.0,
+            pair->last_fence_deferral_msc);
 }
 
 // Zero-timeout poll of both eyes on the RT worker. No EGL/GL operations
@@ -793,7 +803,15 @@ static void *stereo_kms_thread(void *arg)
             fences_ready = stereo_pair_fences_signaled(drm, &s->pending);
             if (!fences_ready) {
                 drm->stereo_pair_fence_deferrals++;
-                s->pending.fence_deferrals++;
+                // Record the ages at the *actual* left-boundary misses,
+                // not just the fence state at later producer replacement.
+                // Only simple scalar bookkeeping runs on the RT worker.
+                int64_t age_ns = s->pending.ready_ns > 0
+                    ? mp_time_ns() - s->pending.ready_ns : -1;
+                if (s->pending.fence_deferrals++ == 0)
+                    s->pending.first_fence_deferral_age_ns = age_ns;
+                s->pending.last_fence_deferral_age_ns = age_ns;
+                s->pending.last_fence_deferral_msc = target_msc;
             }
         }
         bool promote = eligible && fences_ready;
