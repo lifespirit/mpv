@@ -3798,6 +3798,26 @@ void gl_video_set_osd_pts(struct gl_video *p, double pts)
     p->osd_pts = pts;
 }
 
+// The half-SBS experiment changes source subrect every physical eye
+// refresh. gl_video_resize() would reset every interpolation surface and
+// renderer cache each time, even though neither the GL target nor source
+// texture dimensions changed. Only the final rendered-eye output cache
+// needs invalidation in this non-interpolated mode.
+void gl_video_set_sbs_eye(struct gl_video *p, struct mp_rect full_src, int eye)
+{
+    mp_assert(eye == 0 || eye == 1);
+    const int mid = full_src.x0 + (full_src.x1 - full_src.x0) / 2;
+    if (eye == 0)
+        full_src.x1 = mid;
+    else
+        full_src.x0 = mid;
+
+    if (!mp_rect_equals(&p->src_rect, &full_src)) {
+        p->src_rect = full_src;
+        p->output_tex_valid = false;
+    }
+}
+
 void gl_video_resize(struct gl_video *p,
                      struct mp_rect *src, struct mp_rect *dst,
                      struct mp_osd_res *osd)
