@@ -202,3 +202,44 @@ in-flight buffered frames: success is judged by the measured
 A production player ultimately requires an independent
 scanout-driven stereo timing loop and USB phase control. Keep
 the 3D Vision emitter disconnected and do not wear the glasses.
+
+## Third real-world no-USB test: 63 seconds of phase recovery
+
+The first opt-in `MPV_DRM_STEREO_RECOVER=1` test confirmed:
+- **7,560** hardware KMS page-flip events in approximately 63s,
+  with 119.998 Hz mode and 0 DRM atomic commit errors.
+- **8** missed display refresh slots, all in the first ~13 seconds:
+  report windows ending at 1, 3, 11 and 13 seconds had respectively
+  2, 2, 3 and 1 missed cycles.
+- **11** confirmed flips displayed an eye opposite the initial
+  absolute MSC parity; **5** skipped slots held the wrong eye.
+  These are separate from **14** adjacent-flip parity anomalies.
+- `corrections=8`, matching the 8 missed individual slots in
+  this particular run, but that does **not** prove causation,
+  since the recovery logic does not prevent missed page flips.
+- From around second 14 to second 63, 50 consecutive
+  one-second windows had `window_missed=0`,
+  `window_wrong_eye=0`, `window_wrong_hold=0`, and
+  `window_hz=119.997-119.998`.
+
+Interpretation: the phase correction successfully avoided persistent
+reversal of the left/right cadence **after** initial disturbances,
+but does not make individual missed vblanks disappear. Do not
+enable the physical emitter yet.
+
+### Next unmodified-code A/B: GBM/DRM swapchain depth
+
+mpv's documented default `--swapchain-depth=2` allows multiple
+in-flight frames. Its DRM EGL backend holds GBM buffers in a queue
+and waits for KMS page-flip events. The queue may allow extra frames
+rendered ahead with stale eye phase before a missed flip is detected.
+
+Measure the same 90s sample, with unchanged options and audio,
+first at `--swapchain-depth=1` and then at
+`--swapchain-depth=3`. Log each run separately.
+A depth of 1 may reduce in-flight stale-eye errors but can increase
+missed deadlines; a depth of 3 may reduce deadline misses but increase
+the reaction time for parity corrections. Neither outcome should be
+assumed before measurements. If neither is sufficient, change
+the renderer to select the eye by *intended actual DRM MSC slot* and
+separate its 120Hz scanout rhythm from mpv's video-frame delivery.
