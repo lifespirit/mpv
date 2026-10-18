@@ -466,8 +466,11 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
     // Keep the real GBM queue length (including any in-flight BO) as
     // input to the future-MSC estimator; consuming the current flip
     // here would collapse the render/scanout pipeline.
-    if (drm->stereo_test_enabled)
+    if (drm->stereo_test_enabled) {
         drm->stereo_queue_ahead = p->gbm.num_bos > 0 ? p->gbm.num_bos - 1 : 0;
+        drm->stereo_queue_peak = MPMAX(drm->stereo_queue_peak,
+                                       drm->stereo_queue_ahead);
+    }
     drm->redraw = false;
 }
 
