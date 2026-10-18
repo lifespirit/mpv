@@ -1105,6 +1105,7 @@ static bool drm_egl_init(struct ra_ctx *ctx)
         goto err;
 
     struct priv *p = ctx->priv = talloc_zero(ctx, struct priv);
+    struct vo_drm_state *drm = ctx->vo->drm;
     const char *sbs = getenv("MPV_DRM_STEREO_SBS");
     const char *pair = getenv("MPV_DRM_STEREO_PAIR");
     p->stereo.enabled = sbs && pair &&
@@ -1137,7 +1138,6 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     }
     p->drm_params.fd = -1;
     p->drm_params.render_fd = -1;
-    struct vo_drm_state *drm = ctx->vo->drm;
 
     if (ctx->vo->drm->opts->draw_surface_size.wh_valid) {
         p->draw_surface_size.width = ctx->vo->drm->opts->draw_surface_size.w;
