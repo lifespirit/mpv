@@ -1494,3 +1494,59 @@ at 16ms (e.g. >=10 minutes, ideally with varied scenes
 and system load) before considering 16ms a reliable
 operational setting. Leave the KMS worker and atomic code
 unchanged until threshold/reproducibility is characterized.
+
+
+### Sixteenth run: 14ms age gate still misses two first-R scans
+
+The user tested `MIN_PAIR_AGE_MS=14` on Intel i915 / Mesa
+TGL GT2 at ~119.998Hz with regular video playback and
+non-frozen pair promotion. The log
+`mpv-drm-stereo-pair-depth3-rt-1(20261018-212144).log`
+has 104 complete 120-flip report windows, **12,480
+confirmed page flips (~104s)**, with precisely **two**
+one-vblank missed flip events. The final report has
+`shown_hz=119.978 window_hz=119.997`,
+`missed_vblanks=2 parity_errors=4 wrong_eye=2 wrong_hold=2`,
+`first_eye_R_misses=2 first_eye_L_misses=0`,
+`pair_gen=2495 pair_renders=2495 draws=4990`,
+`pair_update_skips=0`, and `commit_errors=0`.
+The reported movie PTS reached ~00:01:44.
+
+The two missed first-right-eye page flips:
+- `previous_msc=4334674 msc=4334676` (approx 5s),
+  `pair_gen=119`, `first_eye=1`,
+  `pair_age_ms=23.502`, `submit_after_callback_ms=0.015`,
+  `atomic_ioctl_ms=0.104`, `commit_callback_ms=16.638`;
+- `previous_msc=4344910 msc=4344912` (approx 90s),
+  `pair_gen=2166`, `first_eye=1`,
+  `pair_age_ms=22.301`, `submit_after_callback_ms=0.013`,
+  `atomic_ioctl_ms=0.096`, `commit_callback_ms=16.660`.
+
+Both are L->R; neither is explained by a slow userspace
+atomic ioctl or user-thread callback handling. New stereo
+pairs continued to be scanned out at ~24fps. At 12ms
+the previously missed first-R pairs had ages ~23.4–23.6ms;
+at 14ms they had ages ~22.3–23.5ms. Thus R-submit age
+alone does not establish a hard threshold; the phase/
+actual GPU fence completion may matter.
+
+The empirical runs so far:
+
+| MIN_PAIR_AGE_MS | Seconds | Missed refreshes |
+| ---: | ---: | ---: |
+| 0 | ~114 | 11 |
+| 12 | 100 | 4 |
+| 14 | 104 | 2 |
+| 16 | 110 | 0 |
+| 25 | 116 | 0 |
+
+Do not declare 16ms a proven guarantee from one 110s
+successful run. Next run a sustained **>=10-minute**
+regular playback `MIN_PAIR_AGE_MS=16`,
+`FREEZE_PAIR=0` to evaluate rare misses and clustering,
+without changing other conditions. Do not use a frozen
+frame or pause for this verification. If a miss recurs
+under 16ms, use 25ms as an interim fallback and improve
+GPU buffer readiness synchronization rather than lowering
+the tolerance further. Even a zero-miss long run cannot
+guarantee safe L/R alternation for shutter glasses.
