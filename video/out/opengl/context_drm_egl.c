@@ -529,6 +529,30 @@ static void stereo_drain_retired(struct ra_ctx *ctx)
         swapchain_step(ctx);
 }
 
+// Capture the submission phase relative to the previous physical vblank.
+ // The DRM timestamp clock must be validated once at setup; CLOCK_MONOTONIC
+ // here is intentionally NOT mp_time_ns() (which uses a different origin).
+static void stereo_stamp_submit_phase(struct vo_drm_state *drm)
+{
+    drm->stereo_prev_callback_lag_ns = drm->stereo_last_callback_lag_ns;
+    drm->stereo_submit_after_ust_ns = -1;
+    if (!drm->stereo_ust_monotonic || !drm->stereo_have_flip)
+        return;
+
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return;
+
+    int64_t cpu_ns = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec;
+    int64_t submit_after_ust_ns =
+        cpu_ns - (int64_t)drm->stereo_last_ust_us * 1000LL;
+    if (submit_after_ust_ns < 0 || submit_after_ust_ns >= 1000000000LL)
+        return;
+    drm->stereo_submit_after_ust_ns = submit_after_ust_ns;
+    drm->stereo_max_submit_after_ust_ns =
+        MPMAX(drm->stereo_max_submit_after_ust_ns, submit_after_ust_ns);
+}
+
 static void *stereo_kms_thread(void *arg)
 {
     struct ra_ctx *ctx = arg;
@@ -620,6 +644,7 @@ static void *stereo_kms_thread(void *arg)
             // plane, using exactly the same fully-rendered GBM framebuffer.
             // Mode setup and restoration remain atomic. The regular
             // page-flip DRM event is consumed by the existing worker.
+            stereo_stamp_submit_phase(drm);
             submit_ns = mp_time_ns();
             ret = drmModePageFlip(drm->fd, drm->crtc_id, fb->id,
                                   DRM_MODE_PAGE_FLIP_EVENT, drm);
@@ -660,6 +685,7 @@ static void *stereo_kms_thread(void *arg)
                 // ZPOS is optional, and is often immutable or missing on AMD.
                 if (fb_property >= 0 && crtc_property >= 0) {
                     drm_object_set_property(req, atomic->draw_plane, "ZPOS", 1);
+                    stereo_stamp_submit_phase(drm);
                     submit_ns = mp_time_ns();
                     ret = drmModeAtomicCommit(drm->fd, req,
                                 DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT,
@@ -1212,6 +1238,19 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     p->stereo.legacy_mode = p->stereo.enabled && legacy &&
                             strcmp(legacy, "1") == 0;
     drm->stereo_pair_legacy_mode = p->stereo.legacy_mode;
+    drm->stereo_last_callback_lag_ns = -1;
+    drm->stereo_prev_callback_lag_ns = -1;
+    drm->stereo_submit_after_ust_ns = -1;
+    if (p->stereo.enabled) {
+        uint64_t timestamp_monotonic = 0;
+        int rc = drmGetCap(drm->fd, DRM_CAP_TIMESTAMP_MONOTONIC,
+                           &timestamp_monotonic);
+        drm->stereo_ust_monotonic = rc == 0 && timestamp_monotonic != 0;
+        MP_INFO(ctx, "Stereo DRM vblank UST clock: %s "
+                "(callback delivery / submit phase diagnostics %s)\n",
+                drm->stereo_ust_monotonic ? "CLOCK_MONOTONIC" : "unverified",
+                drm->stereo_ust_monotonic ? "enabled" : "disabled");
+    }
     if (p->stereo.legacy_mode)
         MP_INFO(ctx, "Stereo experimental legacy CRTC page-flip enabled "
                 "(requires CRTC primary plane; automatic atomic fallback)\n");
