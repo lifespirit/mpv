@@ -249,6 +249,13 @@ struct vo_drm_state {
     int64_t stereo_pair_age_at_submit_ns;
     uint64_t stereo_pair_repeated_flips;
     uint64_t stereo_pair_update_skips;
+    // Pairs replaced/dropped while pending, before their first KMS flip.
+    uint64_t stereo_pair_unpresented_discards;
+    // CPU publication-to-first-submission ages. These do NOT measure
+    // optical scanout or actual audio-video latency.
+    int64_t stereo_pair_first_age_sum_ns[2];
+    int64_t stereo_pair_first_age_min_ns[2];
+    int64_t stereo_pair_first_age_max_ns[2];
 
     char *card_path;
     int card_no;
