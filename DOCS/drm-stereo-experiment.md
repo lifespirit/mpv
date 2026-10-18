@@ -1973,3 +1973,103 @@ per second; some staging-pair drops may occur with
 a nonblocking fence gate, even with zero KMS misses.
 Do not confuse those events with missed 120Hz eye
 alternation.
+
+
+### Twenty-second run: 14m42s native-fence-only with pair-loss/age diagnostics
+
+Uploaded `mpv-drm-stereo-pair-depth3-rt-1(20261018-225132).log`
+contains **882 complete 120-flip report windows** (14m42s of
+confirmed output), on i915/Mesa Tiger Lake Iris Xe.
+Configuration: `NATIVE_FENCE=1`, `MIN_PAIR_AGE_MS=0`
+(the startup contains no minimum-age activation message),
+`FREEZE_PAIR=0`, `GPU_WAIT=0`, 119.998Hz display,
+VAAPI 23.976fps Half-SBS film and the independent
+SCHED_FIFO(10) KMS worker. Last movie time ~00:14:43;
+log ends without an explicit clean shutdown.
+
+**Scanout correctness:** every one of the 882 windows
+reports `window_missed=0`, `missed_vblanks=0`,
+`parity_errors=0`, `wrong_eye=0`,
+`wrong_hold=0`, `max_gap=1`,
+`first_eye_L_misses=0`,
+`first_eye_R_misses=0`,
+`pair_update_skips=0`,
+`commit_errors=0`, and `fence_errors=0`.
+There are **no** `DRM SBS gap` or error/warning
+lines. Total **105,840 confirmed flips**, average
+`shown_hz=119.997`, window readings between
+119.996 and 119.997Hz. Largest per-window
+`max_commit_callback_ms=9.148` (no ~16.6ms missed
+page-flip response).
+
+**New pair-loss accounting:** final diagnostic reports
+`pair_renders=21167`, `pair_gen=21166`,
+`first_eye_L=21141`, `first_eye_R=21141`,
+`fence_promotions=21140`, and
+`pair_unpresented_discards=25`. Thus exactly
+**25 completed prepared stereo generations never
+received a first L/R KMS submission** under this
+measurement; one is at startup, the other 24 are
+distributed over playback (several short clusters,
+e.g. near 10min and 12m30s). Approximately 0.118%
+of all 21,167 producer pair renders were discarded
+before display, around one prepared pair every 35s
+on average. This is not 25 missed vblanks, nor proof
+of 25 distinct decoded PTS drops, but it does mean
+there are 25 intentional pending-pair replacements/
+drops at the producer-to-KMS interface. The ratio
+`pair_gen - first_eye_L = 25` corroborates the
+cumulative discard counter at the last full report.
+
+**Fence polls:** `fence_checks=40531`,
+`fence_promotions=21140`,
+`fence_deferrals=19390`,
+`fence_unready_L=10401`,
+`fence_unready_R=19390`,
+`fence_errors=0`. Every failed poll included the
+right fence; roughly half of these also found the
+left fence unready. Fence deferrals are repeated
+attempts, **not** missed video frames.
+
+**New publication-to-submit age measurements** from
+the last report, cumulative over first appearances:
+- L: min **2.333ms**, avg **26.271ms**, max **41.099ms**;
+- R: min **8.770ms**, avg **34.601ms**, max **49.488ms**.
+
+The avg R-L offset of ~8.33ms is consistent with one
+120Hz refresh. Critically, removing the *fixed*
+25ms promotion threshold has **not** shown a 25ms
+reduction in CPU pair-publication-to-first-scanout
+submission latency: the measured mean first-L age
+in the native-fence-only run is already **26.27ms**.
+However, there is no identically instrumented 25ms
+baseline for a true latency delta. These metrics are
+not render-start/PTS-to-photon or calibrated AV sync.
+
+Overall this reproduces the prior 694s zero-miss
+native-fence-only experiment over 882s with new
+accounting; `NATIVE_FENCE=1` and no age gate is the
+best *verified scanout-phase* configuration tested.
+The remaining investigation is no longer primarily
+the 120Hz L/R alternation (zero errors) but the
+low-rate 24fps staging-pair loss and the ~26ms
+first-L publication age. A one-pair pending staging
+slot can be overwritten when a new rendered pair
+arrives before the old pair qualifies for L-promotion;
+avoid assuming a deep FIFO can be added within a
+3-BO-per-eye GBM surface without checking buffer
+retirement, scanout pinning and producer scheduling.
+
+Next experiment should focus on *why* the 25
+unpresented pairs were superseded: add
+event-level, rate-limited diagnostics at pending
+overwrite/GBM-pressure release with old pair
+generation and age, both fence states, active
+generation and target MSC. Add time-to-fence-signal
+histograms on the producer/worker without blocking
+the KMS RT thread. Use this to determine whether a
+small timing adjustment in pair publication or a
+safe additional ready/pending queue would improve
+frame completeness and average latency; do not
+enable USB shutters based solely on user-space
+phase correctness.
