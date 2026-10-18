@@ -442,7 +442,8 @@ static int preinit(struct vo *vo)
         vo->drm->stereo_flip_eye = -1;
         vo->drm->stereo_last_eye = -1;
         const char *recover = getenv("MPV_DRM_STEREO_RECOVER");
-        vo->drm->stereo_recover = recover && strcmp(recover, "1") == 0;
+        vo->drm->stereo_recover = !p->stereo_pair && recover &&
+                                  strcmp(recover, "1") == 0;
         const char *slot = getenv("MPV_DRM_STEREO_SLOT");
         vo->drm->stereo_slot_mode = !p->stereo_pair &&
                                       slot && strcmp(slot, "1") == 0;
