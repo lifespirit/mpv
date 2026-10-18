@@ -83,6 +83,12 @@ struct stereo_pair {
     int64_t first_fence_deferral_age_ns;
     int64_t last_fence_deferral_age_ns;
     uint32_t last_fence_deferral_msc;
+    // Diagnostic R-vblank probe after two unsuccessful L promotions.
+    // Does not affect pair selection. 0 age means no sample taken.
+    int64_t intermediate_r_probe_age_ns;
+    uint32_t intermediate_r_probe_msc;
+    int intermediate_r_fence_L;
+    int intermediate_r_fence_R;
     uint64_t generation;
     // CPU time when BOTH eye GBM front buffers were published as a pair.
     int64_t ready_ns;
@@ -644,6 +650,8 @@ static void stereo_note_unpresented_pair(struct ra_ctx *ctx,
             "left_boundary_fence_deferrals=%u "
             "first_deferral_age_ms=%.3f last_deferral_age_ms=%.3f "
             "last_deferral_target_msc=%u "
+            "intermediate_R_probe_age_ms=%.3f intermediate_R_probe_msc=%u "
+            "intermediate_R_fence_L=%d intermediate_R_fence_R=%d "
             "(fence: 1=signaled 0=unsignaled -1=unavailable)\n",
             reason, (unsigned long long)count,
             (unsigned long long)pair->generation,
@@ -653,7 +661,14 @@ static void stereo_note_unpresented_pair(struct ra_ctx *ctx,
                 ? pair->first_fence_deferral_age_ns / 1000000.0 : -1.0,
             pair->fence_deferrals
                 ? pair->last_fence_deferral_age_ns / 1000000.0 : -1.0,
-            pair->last_fence_deferral_msc);
+            pair->last_fence_deferral_msc,
+            pair->intermediate_r_probe_age_ns > 0
+                ? pair->intermediate_r_probe_age_ns / 1000000.0 : -1.0,
+            pair->intermediate_r_probe_msc,
+            pair->intermediate_r_probe_age_ns > 0
+                ? pair->intermediate_r_fence_L : -1,
+            pair->intermediate_r_probe_age_ns > 0
+                ? pair->intermediate_r_fence_R : -1);
 }
 
 // Zero-timeout poll of both eyes on the RT worker. No EGL/GL operations
@@ -788,6 +803,23 @@ static void *stereo_kms_thread(void *arg)
                 usleep(1000);
                 continue;
             }
+        }
+        // Diagnostic only: sample twice-deferred pending pairs at the
+        // intermediate R refresh, immediately after their second failed
+        // L-boundary poll. Never promote here: L/R must share a generation.
+        // Only rare candidate drops incur two extra zero-timeout polls.
+        if (s->native_fence && eye == 1 && s->pending.bo[0] &&
+            s->pending.fence_deferrals >= 2 &&
+            s->pending.intermediate_r_probe_age_ns == 0 &&
+            target_msc - s->pending.last_fence_deferral_msc == 1u) {
+            int64_t age_ns = s->pending.ready_ns > 0
+                ? mp_time_ns() - s->pending.ready_ns : -1;
+            s->pending.intermediate_r_probe_age_ns = age_ns;
+            s->pending.intermediate_r_probe_msc = target_msc;
+            s->pending.intermediate_r_fence_L =
+                stereo_debug_fence_ready(s->pending.fence_fd[0]);
+            s->pending.intermediate_r_fence_R =
+                stereo_debug_fence_ready(s->pending.fence_fd[1]);
         }
         // A pair generation may be replaced only on an L boundary. Do
         // not free the old generation until the new L flip is confirmed.
