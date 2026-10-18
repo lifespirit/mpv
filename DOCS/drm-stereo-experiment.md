@@ -1338,3 +1338,57 @@ No kernel, EGL or GL synchronization guarantees derive
 from simply holding a BO for 25ms; age gating is an
 experimental diagnostic, **not** a synchronization primitive.
 The new source has not been compiled on the target laptop.
+
+
+### Thirteenth run: 25ms minimum pair age, no missed vblanks in ~116s
+
+The uploaded `mpv-drm-stereo-pair-depth3-rt-1(10).log`
+used `MPV_DRM_STEREO_MIN_PAIR_AGE_MS=25` and normal,
+non-frozen L/R pair promotion at 119.998 Hz on Intel i915 /
+Mesa Iris Xe. It covered 2,047 lines and 116 full 120-flip
+reporting windows, reaching 13,920 confirmed DRM page-flips
+(~116.00s of hardware scanout), with **zero**
+`DRM SBS gap` records.
+
+The last report:
+- `shown_hz=119.998 window_hz=119.998`,
+  `missed_vblanks=0 parity_errors=0 wrong_eye=0 wrong_hold=0`,
+  `max_gap=1`;
+- `pair_gen=2782 pair_renders=2783 draws=5566`
+  (normal continuous replacement of stereo buffers at ~24fps),
+  `first_eye_L=2781 first_eye_R=2781`;
+- `pair_update_skips=0`, `commit_errors=0`,
+  `first_eye_L_misses=0 first_eye_R_misses=0`;
+- `A-V` in the final movie-time lines (~00:01:56)
+  oscillates around 0ms, but this does NOT measure the
+  added real presentation latency of age gating.
+
+Prior similar-run comparison:
+- normal `MIN_PAIR_AGE_MS=0`: 11 misses in ~114s,
+  all first L->R on new pair presentation in the kernel trace;
+- `FREEZE_PAIR=1`: 0 misses over ~103s with 2,471
+  video pairs rendered but unchanged scanned-out generation;
+- `MIN_PAIR_AGE_MS=25`, `FREEZE_PAIR=0`: 0 misses
+  over ~116s and 2,782 KMS pair generations.
+
+This is strong evidence that holding a prepared pair for
+longer before first KMS scanout eliminates the observed
+sporadic delays on this tested Intel setup, but it is still
+an empirical workaround, not GPU-fence synchronization or
+a proof of which i915 scheduling dependency is responsible.
+
+Next A/B probe: `FREEZE_PAIR=0 MIN_PAIR_AGE_MS=16`,
+with the same ~120s sample and all other variables unchanged.
+If any misses occur, try 20ms; if still zero, repeat
+16ms or try 12ms to bracket the latency tolerance.
+Retain 25ms as a working fallback until the threshold
+and frame-to-physical-scanout latency are characterized.
+`MIN_PAIR_AGE_MS=16` gates *L promotion*, so first R
+scanout will occur one vblank (~8.33ms) later, at least
+~24.3ms from pair CPU publication if KMS flips are on
+adjacent refreshes. This does not guarantee GPU rendering
+has completed, nor does it set a constant 16ms delay.
+
+Do not enable `FREEZE_PAIR=1` in the threshold tests.
+No code changes to the underlying algorithm were made
+following this log analysis.
