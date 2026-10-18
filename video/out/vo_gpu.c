@@ -104,6 +104,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         if (!vo_drm_stereo_pair_can_capture(p->ctx))
             return VO_TRUE; // Keep the last good pair rather than blocking KMS.
 
+        const uint64_t previous_pairs = vo->drm->stereo_pair_rendered;
         for (int eye = 0; eye < 2; eye++) {
             if (!vo_drm_stereo_pair_begin_eye(p->ctx, eye))
                 return VO_FALSE;
@@ -119,6 +120,9 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
             // Captures the locked GBM BO, but does NOT queue a KMS flip.
             sw->fns->swap_buffers(sw);
         }
+        vo_drm_stereo_pair_begin_eye(p->ctx, -1); // stop capturing
+        if (vo->drm->stereo_pair_rendered == previous_pairs)
+            return VO_FALSE; // Do not silently accept an incomplete eye pair.
         p->stereo_pair_valid = true;
         p->stereo_pair_last_frame_id = frame->frame_id;
 
