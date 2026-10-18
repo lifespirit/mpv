@@ -642,7 +642,13 @@ bool vo_drm_stereo_pair_begin_eye(struct ra_ctx *ctx, int eye)
 {
     struct priv *p = ctx->priv;
     struct stereo_kms *s = &p->stereo;
-    if (!s->enabled || (eye != 0 && eye != 1))
+    if (!s->enabled)
+        return false;
+    if (eye == -1) {
+        s->capture_eye = -1;
+        return true;
+    }
+    if (eye != 0 && eye != 1)
         return false;
     EGLSurface surface = eye ? s->right_egl : p->egl.surface;
     if (!eglMakeCurrent(p->egl.display, surface, surface, p->egl.context)) {
