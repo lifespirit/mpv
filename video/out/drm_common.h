@@ -145,6 +145,19 @@ struct vo_drm_state {
     bool vt_switcher_active;
     bool waiting_for_flip;
 
+    // Experimental opt-in SBS shutter-stereo diagnostics (no USB).
+    // A submitted eye is tagged with the GBM buffer it belongs to.
+    bool stereo_test_enabled;
+    int stereo_draw_eye;
+    int stereo_flip_eye;
+    int stereo_last_eye;
+    bool stereo_have_flip;
+    uint32_t stereo_last_msc;
+    uint64_t stereo_last_ust_us;
+    uint64_t stereo_window_first_ust_us;
+    uint64_t stereo_flips, stereo_missed_slots, stereo_parity_errors;
+    uint64_t stereo_draws, stereo_commit_errors;
+
     char *card_path;
     int card_no;
     int fd;
