@@ -564,3 +564,51 @@ new diagnostic prints `fb_prop`, `crtc_prop`, `commit_rc` and
 `errno`. Log the first successfully submitted eye/FB/generation.
 Stop the KMS worker after 60 consecutive failed commits to avoid
 endless busy retries. This fix still needs hardware validation.
+
+
+### Second paired KMS smoke test: 120 Hz scanout, runaway playback speed
+
+After fixing the atomic-property bug, the AMD/KMS worker **did**
+produce picture, with confirmed KMS flip rate 119.997 Hz, zero
+missed slots, zero wrong-eye flips and zero wrong holds over at
+least 1,680 flips. However video advanced roughly 7-10x faster
+than audio and mpv's A-V drift reached -90 seconds.
+
+At the first and second 120-flip reports:
+
+| Metric | flip 120 | flip 240 |
+| --- | ---: | ---: |
+| KMS confirmed flips | 120 | 240 |
+| shown_hz | 119.997 | 119.997 |
+| wrong_eye / window_missed | 0 / 0 | 0 / 0 |
+| pair_renders | 178 | 363 |
+| pair_gen | 175 | 360 |
+| stereo draws | 357 | 728 |
+
+This exposed a separate regression: the paired `vo_gpu.flip_page()`
+returned **immediately**, unlike the original display-synchronized
+GBM swap path which blocks on vblank/backpressure. mpv's
+`--video-sync=display-resample` expects each VO flip to advance
+at approximately the physical monitor refresh; without blocking
+it consumes the source stream at decoder speed, independent of the
+correctly clocked KMS worker. The huge `pair_renders` values
+therefore represent genuinely advancing video, not merely
+duplicated draws.
+
+**Fix:** `drm_egl` now has a dedicated `flip_ready` condition and
+a hardware-confirmed flip sequence counter. The KMS worker signals
+it after processing the real DRM event, while `vo_gpu.flip_page()`
+waits until the independent consumer has confirmed a *new* physical
+flip. The KMS thread never waits for the VO thread. The waiting
+thread releases the stereo mutex during the condition wait;
+`get_vsync` retains the existing mutex to protect the
+`present_sync` feedback. There is a 100 ms maximum wait to
+avoid indefinite stalls if the KMS worker stops or loses events.
+The worker signals waiters on shutdown. No USB emitter involved.
+
+**Next test:** build current `feature/drm-stereo-dual-scanout`
+and run the same command for 10-15 seconds. Look for ~119.998
+KMS flips/s, **~24 pair_renders/s** for 23.976 fps source, and
+small/stable A-V offset. The mode still uses `frame->frame_id`
+to skip video repeats. If repeat behavior is not correct in
+practice, adjust it after reviewing the new test.
