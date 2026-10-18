@@ -161,6 +161,16 @@ struct vo_drm_state {
     uint32_t stereo_max_gap;
     uint64_t stereo_draws, stereo_commit_errors;
 
+    // Shadow diagnosis: physical-slot identity anchored to first page flip.
+    // Optional recovery changes ONLY the next software eye selection.
+    bool stereo_recover;
+    uint32_t stereo_base_msc;
+    int stereo_base_eye;
+    unsigned stereo_phase_correction;
+    uint64_t stereo_absolute_eye_errors, stereo_wrong_hold_slots;
+    uint64_t stereo_last_report_absolute, stereo_last_report_hold;
+    uint64_t stereo_corrections;
+
     char *card_path;
     int card_no;
     int fd;
