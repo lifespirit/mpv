@@ -95,3 +95,52 @@ occasional startup anomaly can be separated from steady playback.
 - Do not wear glasses until the real emitter timing and optical
   latency have been validated separately. Previously observed
   right-lens flicker can cause substantial eye strain.
+
+## First real-world no-USB run (2026-10-18)
+
+The tested direct KMS mode was **119.998 Hz**, VAAPI hwdec active.
+The initial experimental build still called `gl_video_resize()` in
+every 120-Hz eye draw, which invalidated the GPU renderer's temporal
+surfaces/cache on every eye transition. This is an unnecessary and
+potentially severe rendering overhead, not a DRM requirement.
+
+Hardware confirmation from the user's first 31-second log:
+
+- At 720 KMS flips: 2 missed physical refreshes, 0 eye parity errors.
+- At 3120 flips (~26 s): 12 missed refreshes, 10 parity errors,
+  and 0 atomic commit errors.
+- Late in the run, mpv's audio/video DS dropped-frame counter rose
+  rapidly while draw attempts (4351) diverged from confirmed KMS
+  flips (3240); the cumulative hardware counter then reached
+  854 missed refreshes. This is *not* an optical observation.
+  That one late presentation gap heavily biases the final
+  cumulative `shown_hz=105.4`; earlier steady-rate windows
+  were close to 120.
+
+### Follow-up change
+
+The render path now calls `gl_video_set_sbs_eye()` instead of
+`gl_video_resize()` on each eye. The helper changes only the
+video's horizontal source crop and invalidates the cached final-eye
+texture, **without resetting the entire GPU surface history**.
+The full-image geometry is computed once on resize instead of
+on every eye flip.
+
+The KMS report also includes `window_hz`, `window_missed`,
+`window_parity`, and `max_gap`, independent from the
+long-running cumulative `shown_hz`. Individual missed
+flip intervals are logged with both MSC values and eye IDs.
+
+The original behavior still has major limitations:
+- The eye remains selected by the *render attempt count*, rather than
+  actual CRTC MSC parity.
+- mpv's default playback pacing is still responsible for issuing
+  draw calls, and can miss cycles under decoding or other load.
+- This is **NOT** yet a trustworthy real-time 3D shutter engine.
+
+Rebuild and repeat the exact same 30-second no-USB dry test on the
+`feature/drm-stereo-diagnostics` branch. If the new `window_hz`
+is consistently near 119.998 with no missed cycles, proceed
+to hardware-slot-based eye selection. If it still misses, instrument
+buffer-queue latency and decouple the stereoscopic compositor refresh
+from mpv's movie-frame schedule.
