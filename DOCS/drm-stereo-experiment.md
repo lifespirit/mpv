@@ -144,3 +144,61 @@ is consistently near 119.998 with no missed cycles, proceed
 to hardware-slot-based eye selection. If it still misses, instrument
 buffer-queue latency and decouple the stereoscopic compositor refresh
 from mpv's movie-frame schedule.
+
+## Second real-world no-USB test: fast crop and hardware phase recovery
+
+The second no-USB test ran for approximately **93 seconds**, with
+**11,160** KMS-confirmed page flips, **27** missed physical refresh
+slots (including 2 at startup), **23** incremental adjacent-eye
+parity anomalies, and **zero** atomic commit errors. In **83 of the
+92 one-second windows after startup**, no refresh or adjacent-parity
+anomaly occurred; the measured per-window presentation rate was
+virtually exactly 120.000Hz. Misses came in bursts around 33, 46-50,
+56-57 and 87-88 seconds. The prolonged >1000-buffers-without-KMS
+flips failure from v1 was not reproduced.
+
+The remaining bug is that our eye alternation still counts draw
+attempts, rather than absolute CRTC scanout slots. An odd-length
+physical slip can place the wrong eye on all later slots, even if
+subsequent DRM page flips are perfectly 120Hz.
+
+New v3 diagnostics:
+
+- `wrong_eye` = confirmed page flips whose tagged buffer eye does
+  NOT match the *absolute* CRTC MSC parity relative to first
+  confirmed flip. Unlike the original adjacent `parity_errors`,
+  this detects persistent inverted eye phase after one slip.
+- `wrong_hold` = skipped physical vblank slots where the previous
+  buffer remained shown but its eye did not match that physical
+  slot. Such errors cannot be undone by later recovery.
+- `window_wrong_eye` and `window_wrong_hold` = per-report
+  increments of the two counters.
+- `MPV_DRM_STEREO_RECOVER=1` = **opt-in**, no-USB, phase recovery
+  experiment. The page-flip callback detects an odd number of
+  skipped scanout slots and adjusts the software L/R draw parity
+  for following submissions. A frame already submitted cannot
+  be changed, so errors remain possible for one or more flips
+  following a missed deadline.
+- `corrections` = number of observed odd-slot recovery actions;
+  `recovery=on|off` identifies the selected mode.
+
+Run a 90-120 second no-USB test from TTY:
+
+```sh
+MPV_DRM_STEREO_SBS=1 MPV_DRM_STEREO_RECOVER=1 ./build/mpv \
+    --no-config --vo=gpu --gpu-context=drm \
+    --drm-connector=DP-1 --drm-mode=2560x1440@120 \
+    --drm-vrr-enabled=no --video-sync=display-resample \
+    --interpolation=no --hwdec=auto \
+    "/path/to/half-sbs-video.mkv" \
+    2>&1 | tee /tmp/mpv-drm-stereo-recover.log
+```
+
+Compare with `MPV_DRM_STEREO_RECOVER=0` if needed. This only
+corrects the eye of **future rendered buffers**, not the hardware
+refresh rate or KMS submission/presentation jitter. There may be
+in-flight buffered frames: success is judged by the measured
+`wrong_eye`, not by assuming all mismatches have been eliminated.
+A production player ultimately requires an independent
+scanout-driven stereo timing loop and USB phase control. Keep
+the 3D Vision emitter disconnected and do not wear the glasses.
