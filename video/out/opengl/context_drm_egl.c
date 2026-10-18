@@ -652,6 +652,61 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
     struct priv *p = ctx->priv;
     struct vo_drm_state *drm = ctx->vo->drm;
 
+    if (p->stereo.enabled) {
+        struct stereo_kms *s = &p->stereo;
+        const int eye = s->capture_eye;
+        if (eye != 0 && eye != 1)
+            return;
+        struct gbm_surface *surface = eye ? s->right_gbm : p->gbm.surface;
+        EGLSurface egl_surface = eye ? s->right_egl : p->egl.surface;
+        if (!eglSwapBuffers(p->egl.display, egl_surface)) {
+            MP_ERR(ctx, "EGL stereo eye %d swap failed\n", eye);
+            return;
+        }
+        struct gbm_bo *bo = gbm_surface_lock_front_buffer(surface);
+        if (!bo) {
+            MP_ERR(ctx, "Could not lock stereo eye %d GBM front buffer\n", eye);
+            return;
+        }
+        // Create the FB on the EGL thread, so the KMS worker only needs
+        // immutable framebuffer IDs and does not call GBM or EGL.
+        update_framebuffer_from_bo(ctx, bo);
+        struct framebuffer *fb = gbm_bo_get_user_data(bo);
+        if (!fb || !fb->id) {
+            gbm_surface_release_buffer(surface, bo);
+            return;
+        }
+
+        pthread_mutex_lock(&s->mutex);
+        if (s->building.bo[eye]) {
+            gbm_surface_release_buffer(surface, s->building.bo[eye]);
+        }
+        s->building.bo[eye] = bo;
+        if (eye == 1 && s->building.bo[0] && s->building.bo[1]) {
+            s->building.generation = ++s->next_generation;
+            if (!s->active.bo[0]) {
+                s->active = s->building;
+            } else {
+                // Superseded staging pairs were never submitted to KMS.
+                // Do not release active or in-flight BOs here.
+                if (s->pending.bo[0])
+                    stereo_release_pair(p, &s->pending);
+                s->pending = s->building;
+            }
+            s->building = (struct stereo_pair){0};
+            drm->stereo_pair_rendered++;
+            if (!s->started) {
+                s->started = pthread_create(&s->thread, NULL,
+                                             stereo_kms_thread, ctx) == 0;
+                if (!s->started)
+                    MP_ERR(ctx, "Failed to start independent stereo KMS thread\n");
+            }
+            pthread_cond_signal(&s->ready);
+        }
+        pthread_mutex_unlock(&s->mutex);
+        return;
+    }
+
     if (!drm->atomic_context->request) {
         drm->atomic_context->request = drmModeAtomicAlloc();
         p->drm_params.atomic_request_ptr = &drm->atomic_context->request;
