@@ -1147,8 +1147,13 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     "min_submit_after_ust_ms=%.6f max_submit_after_ust_ms=%.3f "
                     "pair=%s pair_gen=%llu pair_renders=%llu "
                     "pair_reuse_flips=%llu pair_update_skips=%llu "
+                    "pair_unpresented_discards=%llu "
                     "first_eye_L=%llu first_eye_R=%llu "
                     "first_eye_L_misses=%llu first_eye_R_misses=%llu "
+                    "first_age_L_min_ms=%.3f first_age_L_avg_ms=%.3f "
+                    "first_age_L_max_ms=%.3f "
+                    "first_age_R_min_ms=%.3f first_age_R_avg_ms=%.3f "
+                    "first_age_R_max_ms=%.3f "
                     "legacy=%s legacy_flips=%llu legacy_fallbacks=%llu "
                     "pair_seq=%s pair_catchups=%llu "
                     "gpu_wait=%s gpu_waits=%llu max_gpu_wait_ms=%.3f "
@@ -1192,10 +1197,23 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     (unsigned long long)drm->stereo_pair_rendered,
                     (unsigned long long)drm->stereo_pair_repeated_flips,
                     (unsigned long long)drm->stereo_pair_update_skips,
+                    (unsigned long long)drm->stereo_pair_unpresented_discards,
                     (unsigned long long)drm->stereo_pair_eye_first_flips[0],
                     (unsigned long long)drm->stereo_pair_eye_first_flips[1],
                     (unsigned long long)drm->stereo_pair_eye_first_misses[0],
                     (unsigned long long)drm->stereo_pair_eye_first_misses[1],
+                    drm->stereo_pair_first_age_min_ns[0] / 1000000.0,
+                    drm->stereo_pair_eye_first_flips[0]
+                        ? drm->stereo_pair_first_age_sum_ns[0] /
+                          (1000000.0 * drm->stereo_pair_eye_first_flips[0])
+                        : 0.0,
+                    drm->stereo_pair_first_age_max_ns[0] / 1000000.0,
+                    drm->stereo_pair_first_age_min_ns[1] / 1000000.0,
+                    drm->stereo_pair_eye_first_flips[1]
+                        ? drm->stereo_pair_first_age_sum_ns[1] /
+                          (1000000.0 * drm->stereo_pair_eye_first_flips[1])
+                        : 0.0,
+                    drm->stereo_pair_first_age_max_ns[1] / 1000000.0,
                     drm->stereo_pair_legacy_mode ? "on" : "off",
                     (unsigned long long)drm->stereo_pair_legacy_flips,
                     (unsigned long long)drm->stereo_pair_legacy_fallbacks,
