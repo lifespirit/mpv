@@ -674,3 +674,65 @@ Then compare 90-120 second runs with `SEQ=0` and `SEQ=1`, keeping
 the exact same video and mpv configuration. Both must continue
 sustaining approximately 24 `pair_renders` and 120 flips per second,
 with stable A/V and zero commit errors. USB remains disabled.
+
+### Fourth paired test: opt-in CRTC-sequence mode
+
+The fourth run with `MPV_DRM_STEREO_SEQ=1` lasted ~108 seconds.
+
+| Metric | Previous baseline (~107 s) | SEQ=1 (~108 s) |
+| --- | ---: | ---: |
+| Confirmed KMS flips | 12,840 | 12,960 |
+| Missed hardware refresh slots | 21 | 10 |
+| Confirmed wrong-eye flips / holds | 21 / 21 | 10 / 10 |
+| Clean windows of 120 flips | 92 / 107 | 98 / 108 |
+| Effective cumulative scanout Hz | 119.801 | 119.904 |
+| DRM commit errors | 0 | 0 |
+| Pair capture skips | 0 | 0 |
+| Complete stereo pairs prepared | 2,570 | 2,591 |
+| A-V at end | ~ -2 ms | ~ +12-13 ms |
+
+The ten misses occurred in report windows #1, #10, #19, #38, #50,
+#55, #69, #72, #101 and #104. Every miss coincided with
+`window_target_misses=1`, and late `max_commit_callback_ms`
+of 16.49-16.71 ms (two 120 Hz refreshes). Normal windows showed
+~8.4-9.0 ms, with occasional up to ~11.8 ms and no physical misses.
+
+Crucially **`pair_catchups=0`** throughout the entire run. The
+sequence query never observed the current CRTC counter ahead of the
+last confirmed page-flip counter. We therefore cannot attribute
+the improvement to sequence-parity correction alone: removal of GBM
+releases from the KMS mutex in the same build, run-to-run timing jitter,
+and the additional query may all be relevant. One sample is not enough
+to estimate the true miss rate precisely.
+
+### Next experiment: worker-only SCHED_FIFO and precise turnaround telemetry
+
+An optional `MPV_DRM_STEREO_RT=1` asks for SCHED_FIFO priority 10
+**on the dedicated KMS thread only**. Other mpv decoder, GL and audio
+threads retain normal priority. When the process lacks permission
+(`RLIMIT_RTPRIO`/CAP_SYS_NICE), the worker logs one warning and
+continues with the normal scheduler; it must never attempt to alter
+privileges itself. Because realtime threads can starve the machine if
+they spin, use only the tested self-blocking KMS worker, never boost
+the whole mpv process.
+
+Per-report `max_submit_after_callback_ms` now measures the maximum
+CPU-side time from the prior DRM event being handled to the next
+atomic submit. Every `DRM SBS gap` also logs its own
+`submit_after_callback_ms` and `commit_callback_ms`.
+Those fields separate a late worker wakeup / userspace mutex stall
+from a commit that was submitted promptly but latched at N+2 rather
+than N+1. They are not display pixel photodiode timing measurements.
+
+Recommended controlled A/B:
+
+1. `MPV_DRM_STEREO_SEQ=1 MPV_DRM_STEREO_RT=0` for a ~2-minute run;
+   confirm baseline turnaround telemetry.
+2. `MPV_DRM_STEREO_SEQ=1 MPV_DRM_STEREO_RT=1` for a similar run;
+   check the startup log for successful SCHED_FIFO activation.
+3. Compare `window_missed`, `target_misses`,
+   `max_submit_after_callback_ms`, and the new per-gap turnaround.
+   Never interpret RT=1 as active unless the startup line confirms it.
+
+No emitter or optical shutter sync has been enabled. Compilation and
+KMS behavior of these new commits still require user-side validation.
