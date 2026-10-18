@@ -630,7 +630,12 @@ static void *stereo_kms_thread(void *arg)
                 ret = drmModeAtomicCommit(drm->fd, req,
                             DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT,
                             drm);
-                failed_errno = ret ? errno : 0;
+                int commit_errno = errno;
+                int64_t ioctl_ns = mp_time_ns() - submit_ns;
+                drm->stereo_commit_ioctl_ns = ioctl_ns;
+                drm->stereo_max_commit_ioctl_ns =
+                    MPMAX(drm->stereo_max_commit_ioctl_ns, ioctl_ns);
+                failed_errno = ret ? commit_errno : 0;
             } else {
                 failed_errno = EINVAL;
             }
