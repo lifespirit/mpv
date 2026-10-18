@@ -1141,3 +1141,83 @@ selecting them; do not assume old i915 tracepoint names exist.
 
 See Linux DRM `get_vblank_timestamp` contract and i915 tracepoint
 descriptions for the kernel used during investigation.
+
+
+### Tenth run: 114-second i915 trace correlated by MSC
+
+The user captured `mpv-i915-trace.txt` using `trace-cmd` alongside
+`mpv-drm-stereo-pair-depth3-rt-1(7).log`. Both refer to
+Intel i915 on Tiger Lake / Mesa Intel Iris Xe (TGL GT2) and
+`RT=1 SEQ=0 GPU_WAIT=0 LEGACY=0` at 119.998 Hz.
+
+The player logged 13,680 confirmed flips over ~114s, 11 missed
+one-refresh slots, zero atomic errors, zero pair-update skips,
+and end A-V ~+2ms. The **11 misses were exclusively L->R**.
+For missed flips, callback->submit took 0.011-0.025ms, the atomic
+ioctl 0.098-0.128ms, and commit->callback 16.57-16.74ms.
+`submit_after_ust_ms` was -0.393 to -0.180ms, so each
+request was submitted shortly before the previous DRM event's
+nominal end-of-vblank timestamp.
+
+The DRM trace contains 14,570
+`drm_vblank_event_delivered` events (plus 793
+`drm_vblank_event` and 9 sets of `intel_pipe_update_*`
+events, the latter chiefly near setup/teardown). Every mpv
+gap corresponds *exactly* to a kernel delivered-event MSC jump:
+3393801->3393803; 3395187->3395189;
+3396773->3396775; 3397829->3397831;
+3400855->3400857; 3401041->3401043;
+3401427->3401429; 3402481->3402483;
+3403827->3403829; 3404423->3404425;
+3404439->3404441.
+The kernel-delivered event intervals for those jumps are
+16.627-16.733ms, consistent with the userspace per-gap logs.
+Normal consecutive events for the movie are ~8.334ms apart
+(median for 13,701 consecutive event pairs). An earlier
+3391767->3391777 gap is around transition into mpv and
+is **not** a playback miss.
+
+The trace therefore rules out losing these 11 events
+between kernel DRM delivery and `drmHandleEvent`. It does
+**not** establish why the flip failed to happen by the
+immediately following physical refresh: completed flips have
+events, while a scanout retained for an extra refresh need
+not have its own page-flip completion event. Only a small
+subset of frames emitted the available `drm_vblank_event`
+tracepoint, and `intel_pipe_update_*` events don't cover
+ordinary per-frame flips; this capture does not reveal
+kernel commit-worker or implicit fence scheduling.
+
+A clear new pattern is that every missed request tried
+to display the RIGHT eye. That may relate to right-eye
+buffer readiness (it is the second eye rendered) or to
+first display of a new pair generation; it may also be
+a coincidence/other i915 internal scheduling behavior.
+The new diagnostic reports `first_eye`, `pair_gen`,
+and `pair_age_ms` on gaps, plus cumulative
+`first_eye_L/R` and `first_eye_L/R_misses` counters.
+Here `pair_age_ms` is CPU time from publication of a
+fully prepared pair to the submission attempt: **not**
+a GPU fence-completion timestamp.
+
+Next recommended *no-code* A/B experiment:
+1. Rebuild the branch with first-eye diagnostics, play
+   normally for 120s (baseline) and save its log.
+2. Start again with the identical options; after a few
+   seconds press `space` to pause mpv and leave the
+   independent KMS worker running for ~120s. Verify
+   `DRM SBS test` continues incrementing `flips`
+   while paused. If KMS activity stops on pause, the
+   trial is invalid.
+3. Compare `missed_vblanks` **delta while paused** vs
+   delta while playing, not startup misses. No new
+   frames or stereo pairs should be produced when paused,
+   but the KMS worker will keep alternating the static
+   active pair. If misses remain, rendering concurrency
+   and fresh framebuffer readiness are unlikely to be
+   necessary for the issue. If they disappear, first-eye
+   statistics and actual fence completion should be
+   examined before any broad driver changes.
+
+The added diagnostic source has not been compiled or
+runtime tested on the target host.
