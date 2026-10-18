@@ -58,6 +58,9 @@ struct gpu_priv {
     // Experimental --vo=gpu --gpu-context=drm SBS alternation, no USB.
     bool stereo_test;
     uint64_t stereo_draw_count;
+    bool stereo_pair;
+    bool stereo_pair_valid;
+    uint64_t stereo_pair_last_frame_id;
     struct mp_rect stereo_full_src;
 };
 static void resize(struct vo *vo)
@@ -89,6 +92,44 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 {
     struct gpu_priv *p = vo->priv;
     struct ra_swapchain *sw = p->ctx->swapchain;
+
+#if HAVE_DRM
+    if (p->stereo_pair) {
+        // The VO thread remains mpv's decoder-side producer. An independent
+        // KMS thread repeatedly scans out the last completed L/R pair.
+        // Don't draw twice at 120 Hz when the source only changes at ~24 Hz.
+        if (!frame->current || (p->stereo_pair_valid &&
+            p->stereo_pair_last_frame_id == frame->frame_id))
+            return VO_TRUE;
+        if (!vo_drm_stereo_pair_can_capture(p->ctx))
+            return VO_TRUE; // Keep the last good pair rather than blocking KMS.
+
+        for (int eye = 0; eye < 2; eye++) {
+            if (!vo_drm_stereo_pair_begin_eye(p->ctx, eye))
+                return VO_FALSE;
+            struct ra_fbo eye_fbo;
+            if (!sw->fns->start_frame(sw, &eye_fbo))
+                return VO_FALSE;
+            gl_video_set_sbs_eye(p->renderer, p->stereo_full_src, eye);
+            vo->drm->stereo_draw_eye = eye;
+            ++vo->drm->stereo_draws;
+            gl_video_render_frame(p->renderer, frame, &eye_fbo, RENDER_FRAME_DEF);
+            if (!sw->fns->submit_frame(sw, frame))
+                return VO_FALSE;
+            // Captures the locked GBM BO, but does NOT queue a KMS flip.
+            sw->fns->swap_buffers(sw);
+        }
+        p->stereo_pair_valid = true;
+        p->stereo_pair_last_frame_id = frame->frame_id;
+
+        struct mp_image_params *params =
+            gl_video_get_target_params_ptr(p->renderer);
+        mp_mutex_lock(&vo->params_mutex);
+        vo->target_params = params;
+        mp_mutex_unlock(&vo->params_mutex);
+        return VO_TRUE;
+    }
+#endif
 
     struct ra_fbo fbo;
     if (!sw->fns->start_frame(sw, &fbo))
@@ -144,7 +185,8 @@ static void flip_page(struct vo *vo)
 {
     struct gpu_priv *p = vo->priv;
     struct ra_swapchain *sw = p->ctx->swapchain;
-    sw->fns->swap_buffers(sw);
+    if (!p->stereo_pair)
+        sw->fns->swap_buffers(sw);
 }
 
 static void get_vsync(struct vo *vo, struct vo_vsync_info *info)
@@ -171,6 +213,7 @@ static int reconfig(struct vo *vo, struct mp_image_params *params)
         return -1;
 
     resize(vo);
+    p->stereo_pair_valid = false;
     if (p->stereo_test && (params->w < 2 || (params->w & 1)
                             || params->rotate % 180)) {
         MP_ERR(vo, "DRM stereo test requires even-width, unrotated SBS frames\n");
@@ -373,6 +416,12 @@ static int preinit(struct vo *vo)
     // This is deliberately not a generic Wayland/X11 stereo mode.
     const char *stereo_env = getenv("MPV_DRM_STEREO_SBS");
     p->stereo_test = stereo_env && strcmp(stereo_env, "1") == 0;
+    const char *pair_env = getenv("MPV_DRM_STEREO_PAIR");
+    p->stereo_pair = pair_env && strcmp(pair_env, "1") == 0;
+    if (p->stereo_pair && !p->stereo_test) {
+        MP_ERR(vo, "MPV_DRM_STEREO_PAIR requires MPV_DRM_STEREO_SBS=1\n");
+        goto err_out;
+    }
     if (p->stereo_test) {
 #if HAVE_DRM
         if (strcmp(p->ctx->fns->name, "drm") != 0 || !vo->drm) {
@@ -391,12 +440,13 @@ static int preinit(struct vo *vo)
         const char *recover = getenv("MPV_DRM_STEREO_RECOVER");
         vo->drm->stereo_recover = recover && strcmp(recover, "1") == 0;
         const char *slot = getenv("MPV_DRM_STEREO_SLOT");
-        vo->drm->stereo_slot_mode = slot && strcmp(slot, "1") == 0;
-        MP_INFO(vo, "Experimental DRM SBS L/R at %.3f Hz "
-                "(NO USB, MSC slot scheduler %s, legacy phase recovery %s)\n",
-                hz, vo->drm->stereo_slot_mode ? "on" : "off",
-                vo->drm->stereo_recover && !vo->drm->stereo_slot_mode
-                    ? "on" : "off");
+        vo->drm->stereo_slot_mode = !p->stereo_pair &&
+                                      slot && strcmp(slot, "1") == 0;
+        vo->drm->stereo_pair_mode = p->stereo_pair;
+        MP_INFO(vo, "Experimental DRM SBS at %.3f Hz "
+                "(NO USB, independent paired KMS scanout %s, slot=%s)\n",
+                hz, p->stereo_pair ? "on" : "off",
+                vo->drm->stereo_slot_mode ? "on" : "off");
 #else
         MP_ERR(vo, "MPV_DRM_STEREO_SBS=1 was built without DRM support\n");
         goto err_out;
