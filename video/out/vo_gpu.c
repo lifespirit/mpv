@@ -38,7 +38,11 @@
 #include "gpu/context.h"
 #include "gpu/hwdec.h"
 #include "gpu/video.h"
+
+#include "config.h"
+#if HAVE_DRM
 #include "drm_common.h"
+#endif
 
 struct gpu_priv {
     struct mp_log *log;
@@ -101,8 +105,10 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         else
             src.x0 = mid;
         gl_video_resize(p->renderer, &src, &dst, &osd);
+#if HAVE_DRM
         vo->drm->stereo_draw_eye = eye;
         ++vo->drm->stereo_draws;
+#endif
         ++p->stereo_draw_count;
     }
 
@@ -354,6 +360,7 @@ static int preinit(struct vo *vo)
     const char *stereo_env = getenv("MPV_DRM_STEREO_SBS");
     p->stereo_test = stereo_env && strcmp(stereo_env, "1") == 0;
     if (p->stereo_test) {
+#if HAVE_DRM
         if (strcmp(p->ctx->fns->name, "drm") != 0 || !vo->drm) {
             MP_ERR(vo, "MPV_DRM_STEREO_SBS=1 requires --gpu-context=drm\n");
             goto err_out;
@@ -368,6 +375,10 @@ static int preinit(struct vo *vo)
         vo->drm->stereo_flip_eye = -1;
         vo->drm->stereo_last_eye = -1;
         MP_INFO(vo, "Experimental DRM SBS L/R alternation at %.3f Hz (NO USB)\n", hz);
+#else
+        MP_ERR(vo, "MPV_DRM_STEREO_SBS=1 was built without DRM support\n");
+        goto err_out;
+#endif
     }
 
     return 0;
