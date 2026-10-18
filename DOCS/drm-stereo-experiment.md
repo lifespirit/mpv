@@ -333,3 +333,35 @@ stereo cadence unsafe for shutter glasses.
   buffers are always better.
 - No physical 3D glasses/IR emitter should be enabled until measured
   KMS cadence and optical shutter timing are both validated.
+
+### Fifth test: forced-flip regression and fix
+
+The first `MPV_DRM_STEREO_SLOT=1` build unintentionally forced a
+new atomic flip *and synchronously waited for its callback on every
+draw*. This drained the GBM queue to zero waiting BOs regardless
+of `--swapchain-depth`, serializing GPU rendering and display updates.
+
+In actual approximately 68-second runs:
+
+| swapchain depth | flips | shown_hz | missed_vblanks | wrong_eye | target_misses |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 3 | 4320 | 64.229 | 3750 | 1472 | 2598 |
+| 4 | 4440 | 65.777 | 3659 | 1577 | 2605 |
+| 5 | 7080 | 105.970 | 937 | 373 | 655 |
+
+Each run reported `pending=0` and `discards=0` in every 120-flip
+window; `commit_errors=0`. A larger queue depth was not a solution
+to the forced synchronous pipeline.
+
+**Fix:** remove the forced flip and unconditional wait, and restore
+the pre-existing asynchronous GBM swapchain pressure loop. The
+MSC-targeting metadata, conditional stale-eye discard, and diagnostics
+remain available. New reports also include `peak_pending` (maximum
+number of pending BOs in the reporting window) to verify the queue
+actually fills.
+
+**The fix is not yet validated by a local build or new KMS run.**
+Rebuild and test depth=3 for 90-120 seconds first. Only if that
+sustains near 120 fps should depth=4 and 5 be tested. Monitor both
+`peak_pending` and the L/R correctness metrics; a higher queue
+depth does not itself guarantee phase correctness.
