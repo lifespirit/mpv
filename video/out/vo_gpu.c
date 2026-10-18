@@ -189,8 +189,16 @@ static void flip_page(struct vo *vo)
 {
     struct gpu_priv *p = vo->priv;
     struct ra_swapchain *sw = p->ctx->swapchain;
-    if (!p->stereo_pair)
-        sw->fns->swap_buffers(sw);
+#if HAVE_DRM
+    if (p->stereo_pair) {
+        // The independently running KMS worker advances each physical
+        // vblank. mpv's display-resample scheduler still needs blocking
+        // presentation feedback once per VO flip to maintain AV speed.
+        vo_drm_stereo_pair_wait_vsync(p->ctx);
+        return;
+    }
+#endif
+    sw->fns->swap_buffers(sw);
 }
 
 static void get_vsync(struct vo *vo, struct vo_vsync_info *info)
