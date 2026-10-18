@@ -232,5 +232,7 @@ void vo_drm_release_crtc(struct vo_drm_state *drm);
 struct ra_ctx;
 bool vo_drm_stereo_pair_begin_eye(struct ra_ctx *ctx, int eye);
 bool vo_drm_stereo_pair_can_capture(struct ra_ctx *ctx);
+// Pace the mpv display-synced VO independently of the KMS scanout worker.
+void vo_drm_stereo_pair_wait_vsync(struct ra_ctx *ctx);
 
 #endif
