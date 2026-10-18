@@ -736,3 +736,79 @@ Recommended controlled A/B:
 
 No emitter or optical shutter sync has been enabled. Compilation and
 KMS behavior of these new commits still require user-side validation.
+
+
+### Paired KMS A/B: RT=0 versus SCHED_FIFO(10)
+
+Two ~1.5 minute runs with `MPV_DRM_STEREO_SEQ=1` on the AMD
+DRM/GBM/EGL host:
+
+| Metric | RT=0 | RT=1 |
+| --- | ---: | ---: |
+| Confirmed flips | 12,720 | 11,640 |
+| Duration based on 120-flip windows | ~106 s | ~97 s |
+| Skipped physical vblanks | 19 | 9 |
+| Skips/minute | 10.75 | 5.57 |
+| Wrong-eye flips | 19 | 9 |
+| Largest callback-to-next-submit latency per run | 0.265 ms | 0.176 ms |
+| Median of per-window max callback-to-submit | 0.185 ms | 0.061 ms |
+| Atomic commit errors | 0 | 0 |
+| Pair producer skips | 0 | 0 |
+| Terminal A-V offset | +4 ms | +6 ms |
+
+The RT=1 run confirmed startup log
+`Stereo KMS thread scheduling: SCHED_FIFO priority 10`.
+The observed skipped-refresh rate declined about 48%, but two runs
+alone do not establish a true long-run percentage.
+
+At the individual **missed** refreshes, the KMS worker actually sent
+the next atomic commit only 0.012–0.105 ms after the preceding callback
+and the *commit to callback* time was 16.44–16.74 ms rather than the
+normal ~8.4–9 ms. Every observed miss was a one-slot miss, not a long
+pause. Thus the measured **user-space turnaround is already fast**;
+the remaining misses appear to happen after submit, due to the
+atomic commit or buffer readiness not hitting the expected scanout
+refresh.
+
+Notably, the misses are substantially asymmetric:
+
+| Previous eye -> incoming eye at miss | RT=0 | RT=1 |
+| --- | ---: | ---: |
+| L -> R | 17 | 7 |
+| R -> L | 2 | 2 |
+
+Across both experiments 24/28 misses occurred when trying to show
+the right eye. The producer renders L then R on separate GBM/EGL
+surfaces; an EGL swap does not necessarily wait for rendering
+completion. A plausible cause is that the later-rendered right
+GBM buffer is still pending an implicit GPU fence when KMS tries
+to scan it out. This is **a hypothesis, not a confirmed diagnosis**.
+
+### Opt-in producer-side GPU wait
+
+`MPV_DRM_STEREO_GPU_WAIT=1` invokes `eglWaitClient()` **once per
+completed pair after the right-eye swap, before locking the right-eye
+GBM BO and publishing the pair**. Waiting on the GL producer thread,
+instead of the 120 Hz KMS worker, allows scanout to continue reusing
+the last complete L/R pair while the GPU completes rendering. This
+feature is **off by default** so the previous working behavior
+remains intact.
+
+New `DRM SBS test` fields:
+- `gpu_wait=on/off`: whether the experiment is enabled.
+- `gpu_waits`: cumulative number of GPU completion waits.
+- `max_gpu_wait_ms`: largest `eglWaitClient()` duration in that
+  120-flip reporting window.
+
+For the next controlled comparison, use the same source, same
+`--swapchain-depth=3`, `SEQ=1`, and `RT=1`. Compare
+`GPU_WAIT=0` versus `GPU_WAIT=1` for at least ~2 minutes
+each, including A-V drift, pair capture skips, gaps split by L/R
+direction, and `max_gpu_wait_ms`. The latter may show large GPU
+waits even if the scanout rate improves, because this opt-in test
+deliberately synchronizes the producer. A win on miss rate would
+support the implicit-fence hypothesis, but could also result from
+the change in publication timing; repeat as needed.
+
+Compilation and runtime stability of this opt-in change have **not**
+been verified on the target hardware. Keep the USB IR emitter off.
