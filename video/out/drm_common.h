@@ -155,7 +155,10 @@ struct vo_drm_state {
     uint32_t stereo_last_msc;
     uint64_t stereo_last_ust_us;
     uint64_t stereo_window_first_ust_us;
+    uint64_t stereo_last_report_ust_us;
+    uint64_t stereo_last_report_missed, stereo_last_report_parity;
     uint64_t stereo_flips, stereo_missed_slots, stereo_parity_errors;
+    uint32_t stereo_max_gap;
     uint64_t stereo_draws, stereo_commit_errors;
 
     char *card_path;
