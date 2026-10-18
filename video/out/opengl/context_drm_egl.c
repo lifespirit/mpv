@@ -414,7 +414,7 @@ static void stereo_align_pending(struct ra_ctx *ctx)
         struct gbm_frame *obsolete = p->gbm.bo_queue[1];
         gbm_surface_release_buffer(p->gbm.surface, obsolete->bo);
         talloc_free(obsolete);
-        MP_TARRAY_REMOVE_AT(p, p->gbm.bo_queue, p->gbm.num_bos, 1);
+        MP_TARRAY_REMOVE_AT(p->gbm.bo_queue, p->gbm.num_bos, 1);
         drm->stereo_queue_discards++;
     }
 }
