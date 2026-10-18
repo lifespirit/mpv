@@ -338,6 +338,17 @@ static int preinit(struct vo *vo)
     mp_assert(p->ctx->ra);
     mp_assert(p->ctx->swapchain);
 
+    p->renderer = gl_video_init(p->ctx->ra, vo->log, vo->global);
+    gl_video_set_osd_source(p->renderer, vo->osd);
+    gl_video_configure_queue(p->renderer, vo);
+
+    get_and_update_icc_profile(p);
+
+    vo->hwdec_devs = hwdec_devices_create();
+    hwdec_devices_set_loader(vo->hwdec_devs, call_request_hwdec_api, vo);
+
+    gl_video_init_hwdecs(p->renderer, p->ctx, vo->hwdec_devs, false);
+
     // Only the direct DRM/EGL backend can provide KMS flip events.
     // This is deliberately not a generic Wayland/X11 stereo mode.
     const char *stereo_env = getenv("MPV_DRM_STEREO_SBS");
@@ -358,17 +369,6 @@ static int preinit(struct vo *vo)
         vo->drm->stereo_last_eye = -1;
         MP_INFO(vo, "Experimental DRM SBS L/R alternation at %.3f Hz (NO USB)\n", hz);
     }
-
-    p->renderer = gl_video_init(p->ctx->ra, vo->log, vo->global);
-    gl_video_set_osd_source(p->renderer, vo->osd);
-    gl_video_configure_queue(p->renderer, vo);
-
-    get_and_update_icc_profile(p);
-
-    vo->hwdec_devs = hwdec_devices_create();
-    hwdec_devices_set_loader(vo->hwdec_devs, call_request_hwdec_api, vo);
-
-    gl_video_init_hwdecs(p->renderer, p->ctx, vo->hwdec_devs, false);
 
     return 0;
 
