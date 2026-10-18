@@ -57,6 +57,7 @@ struct gpu_priv {
     // Experimental --vo=gpu --gpu-context=drm SBS alternation, no USB.
     bool stereo_test;
     uint64_t stereo_draw_count;
+    struct mp_rect stereo_full_src;
 };
 static void resize(struct vo *vo)
 {
@@ -68,6 +69,7 @@ static void resize(struct vo *vo)
     struct mp_rect src, dst;
     struct mp_osd_res osd;
     vo_get_src_dst_rects(vo, &src, &dst, &osd);
+    p->stereo_full_src = src;
 
     // The first eye will be selected by the first draw_frame() call.
     // Do not half the viewport in the global aspect calculation; each
@@ -92,15 +94,12 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         return VO_FALSE;
 
     if (p->stereo_test && frame->current) {
-        struct mp_rect src, dst;
-        struct mp_osd_res osd;
-        vo_get_src_dst_rects(vo, &src, &dst, &osd);
         // The experimental mode accepts half SBS without 90/270-degree
         // rotation. Keep mpv's regular full-image viewport and select
         // the eye via a lightweight source crop. Critically, do NOT call
         // gl_video_resize() every 8.33ms: that resets the GPU caches.
         const int eye = p->stereo_draw_count & 1;
-        gl_video_set_sbs_eye(p->renderer, src, eye);
+        gl_video_set_sbs_eye(p->renderer, p->stereo_full_src, eye);
 #if HAVE_DRM
         vo->drm->stereo_draw_eye = eye;
         ++vo->drm->stereo_draws;
