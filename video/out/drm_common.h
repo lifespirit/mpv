@@ -202,6 +202,9 @@ struct vo_drm_state {
     bool stereo_pair_mode;
     bool stereo_pair_sequence_mode;
     uint64_t stereo_pair_sequence_catchups;
+    bool stereo_pair_gpu_wait;
+    uint64_t stereo_pair_gpu_waits;
+    int64_t stereo_max_gpu_wait_ns;
     int stereo_capture_eye;
     uint64_t stereo_capture_generation;
     uint64_t stereo_pair_rendered;
