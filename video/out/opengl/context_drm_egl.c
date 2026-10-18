@@ -1239,6 +1239,19 @@ static bool drm_egl_init(struct ra_ctx *ctx)
                          strcmp(gpu_wait, "1") == 0;
     drm->stereo_pair_sequence_mode = p->stereo.sequence_mode;
     drm->stereo_pair_gpu_wait = p->stereo.gpu_wait;
+    if (p->stereo.enabled) {
+        // DRM/KMS may select a different GPU than the machine's first
+        // lspci VGA controller. Identify the *opened* KMS fd explicitly.
+        drmVersionPtr v = drmGetVersion(drm->fd);
+        MP_INFO(ctx, "Stereo DRM/KMS: node=%s driver=%s version=%d.%d.%d\n",
+                drm->card_path ? drm->card_path : "(unknown)",
+                v && v->name ? v->name : "(unknown)",
+                v ? v->version_major : 0,
+                v ? v->version_minor : 0,
+                v ? v->version_patchlevel : 0);
+        if (v)
+            drmFreeVersion(v);
+    }
     const char *legacy = getenv("MPV_DRM_STEREO_LEGACY");
     p->stereo.legacy_mode = p->stereo.enabled && legacy &&
                             strcmp(legacy, "1") == 0;
@@ -1357,6 +1370,15 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     }
 
     mpegl_load_functions(&p->gl, ctx->vo->log);
+    if (p->stereo.enabled && p->gl.GetString) {
+        // The GL context is now current: this reports the actual GPU
+        // renderer, which need not be the card inferred from lspci.
+        const char *vendor = (const char *)p->gl.GetString(GL_VENDOR);
+        const char *renderer = (const char *)p->gl.GetString(GL_RENDERER);
+        MP_INFO(ctx, "Stereo EGL/GL: vendor=%s renderer=%s\n",
+                vendor ? vendor : "(unknown)",
+                renderer ? renderer : "(unknown)");
+    }
     // required by gbm_surface_lock_front_buffer
     eglSwapBuffers(p->egl.display, p->egl.surface);
 
