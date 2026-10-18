@@ -590,7 +590,10 @@ static void *stereo_kms_thread(void *arg)
 
         // Only this thread drains DRM page-flip events in paired mode.
         // The callback records the true MSC and updates the next phase.
+        // During shutdown, give an in-flight page flip a bounded chance
+        // to finish before the caller restores the previous CRTC mode.
         bool complete = false;
+        unsigned shutdown_polls = 0;
         while (!complete) {
             struct pollfd fd = {.fd = drm->fd, .events = POLLIN};
             int n = poll(&fd, 1, 50);
@@ -605,7 +608,12 @@ static void *stereo_kms_thread(void *arg)
                        mp_strerror(errno));
                 s->stop = true;
             }
-            complete = !drm->waiting_for_flip || s->stop;
+            if (s->stop && drm->waiting_for_flip && ++shutdown_polls >= 20) {
+                MP_WARN(ctx, "Timed out waiting for final stereo KMS flip on shutdown\n");
+                complete = true;
+            } else {
+                complete = !drm->waiting_for_flip;
+            }
             if (complete && old.bo[0]) {
                 // If stopping on a timeout, uninit will first restore the
                 // old CRTC state before any retired BO is released.
