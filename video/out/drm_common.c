@@ -1102,6 +1102,7 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     "max_atomic_ioctl_ms=%.3f "
                     "pair=%s pair_gen=%llu pair_renders=%llu "
                     "pair_reuse_flips=%llu pair_update_skips=%llu "
+                    "legacy=%s legacy_flips=%llu legacy_fallbacks=%llu "
                     "pair_seq=%s pair_catchups=%llu "
                     "gpu_wait=%s gpu_waits=%llu max_gpu_wait_ms=%.3f "
                     "draws=%llu commit_errors=%llu msc=%u eye=%s "
@@ -1135,6 +1136,9 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     (unsigned long long)drm->stereo_pair_rendered,
                     (unsigned long long)drm->stereo_pair_repeated_flips,
                     (unsigned long long)drm->stereo_pair_update_skips,
+                    drm->stereo_pair_legacy_mode ? "on" : "off",
+                    (unsigned long long)drm->stereo_pair_legacy_flips,
+                    (unsigned long long)drm->stereo_pair_legacy_fallbacks,
                     drm->stereo_pair_sequence_mode ? "on" : "off",
                     (unsigned long long)drm->stereo_pair_sequence_catchups,
                     drm->stereo_pair_gpu_wait ? "on" : "off",
