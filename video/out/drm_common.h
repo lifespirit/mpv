@@ -195,6 +195,8 @@ struct vo_drm_state {
     // Opt-in dual-surface producer / independent DRM vblank scanout.
     // Stereo pair operations are implemented by the drm EGL context.
     bool stereo_pair_mode;
+    bool stereo_pair_sequence_mode;
+    uint64_t stereo_pair_sequence_catchups;
     int stereo_capture_eye;
     uint64_t stereo_capture_generation;
     uint64_t stereo_pair_rendered;
