@@ -612,3 +612,65 @@ KMS flips/s, **~24 pair_renders/s** for 23.976 fps source, and
 small/stable A-V offset. The mode still uses `frame->frame_id`
 to skip video repeats. If repeat behavior is not correct in
 practice, adjust it after reviewing the new test.
+
+
+### Third paired test: restored real-time playback; isolated MSC misses
+
+In the ~107-second third run with paired output and VO vblank pacing:
+
+| Metric | Full run |
+| --- | ---: |
+| Confirmed flips | 12,840 |
+| Cumulative shown_hz | 119.801 |
+| Normal window_hz | 119.997 |
+| Complete L/R pairs rendered | 2,570 (~24/s) |
+| Stereo eye renders | 5,140 (~48/s) |
+| Hardware flips reusing a completed pair | 10,271 |
+| Skipped physical vblanks | 21 |
+| Wrong-eye flips / holds | 21 / 21 |
+| Atomic commit errors | 0 |
+| Pair producer no-free-buffer skips | 0 |
+| Final audio-video deviation | ~ -2 ms |
+
+92/107 report windows had no missed physical slot. Misses clustered in
+15 windows, including a five-slot burst near window #42. The long-term
+audio-video deviation remained near zero and no AV desync warning was
+logged. The `DS: ~5.0` ratio is the expected approximately five 120 Hz
+refreshes per 23.976 fps source frame, **not** 5x playback speed.
+
+The remaining failure mechanism is a rare delayed KMS submit/callback:
+the worker normally predicts the next eye from `last_msc+1`. If a
+physical vblank advances during a delayed worker wakeup, a flip
+submitted for that predicted MSC can land on a later MSC and carry
+the wrong eye for one slot. The next flip uses the confirmed MSC and
+automatically restores phase.
+
+Follow-up fixes:
+
+1. Move retired GBM buffer releases out of the KMS mutex critical
+   section to reduce scheduling interference during 120 Hz scanout.
+2. Opt-in `MPV_DRM_STEREO_SEQ=1` uses
+   `drmCrtcGetSequence(fd, crtc_id, ...)` immediately before the
+   atomic request, predicts the actual upcoming sequence, and chooses
+   the eye by physical MSC parity. The default behavior is unchanged.
+   If the query fails, fall back to last confirmed page-flip MSC.
+3. Log `pair_seq=on/off`, `pair_catchups`, existing
+   `target_misses/window_target_misses`, and
+   `max_commit_callback_ms` to distinguish late submissions from
+   late scanout when comparing with the original mode.
+
+The sequence query is **not** atomic with the subsequent commit;
+a vblank racing between the query and submit can still cause an
+off-by-one prediction. The additional ioctl also costs some time, so
+the new mode must be tested rather than assumed superior. Future
+testing may need optional SCHED_FIFO for the isolated KMS thread
+(with appropriate RT scheduling permissions), but avoid doing
+that before establishing the new timing histogram.
+
+**Validation**: new commits were not locally compiled or tested on
+the AMD/KMS host. First run a short test with `MPV_DRM_STEREO_SEQ=1`
+to confirm the new query succeeds and `target_misses` are populated.
+Then compare 90-120 second runs with `SEQ=0` and `SEQ=1`, keeping
+the exact same video and mpv configuration. Both must continue
+sustaining approximately 24 `pair_renders` and 120 flips per second,
+with stable A/V and zero commit errors. USB remains disabled.
