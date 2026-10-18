@@ -1622,3 +1622,71 @@ investigate proper EGL/DRM fence readiness and scheduling,
 not a claim that an arbitrary age solves the issue.
 Do not proceed to USB shutter timing based solely on
 short-run zero-miss logs.
+
+
+### Eighteenth run: 25ms pair age has zero misses across fifteen minutes
+
+The user supplied `mpv-drm-stereo-pair-depth3-rt-1(20261018-215521).log`,
+normal real-time movie playback with Intel i915, Mesa
+Iris Xe (TGL GT2), `MPV_DRM_STEREO_MIN_PAIR_AGE_MS=25`,
+normal non-frozen stereo-pair promotion and
+`SCHED_FIFO` priority 10 for the independent 120 Hz KMS
+worker. This is the requested long-run A/B comparison
+against the 16ms gate's three misses in 11m01s.
+
+The full log contains **899** one-second (`120 flip`)
+KMS report windows; the last completed report contains
+**107,880 confirmed page-flip events**, corresponding to
+~899s = **14m59s** at a display mode of 119.998Hz.
+The mpv movie time advanced to `00:15:00`; no clean
+player shutdown is present in the capture.
+
+All 899 KMS diagnostic windows were checked. Every
+`window_missed=0`, `missed_vblanks=0`,
+`parity_errors=0`, `wrong_eye=0`, `wrong_hold=0`,
+`pair_update_skips=0`, and `commit_errors=0`;
+there were no `DRM SBS gap` lines. All windows had
+`window_hz` between 119.996 and 119.998Hz.
+Maximum *per-window* `max_commit_callback_ms` was
+9.161ms, well short of the double-vblank (~16.6ms)
+callbacks seen in failed 12/14/16ms tests. The worst
+observed per-window `max_atomic_ioctl_ms` was 5.281ms
+during startup, not associated with any missed vblank.
+
+At the final complete report:
+`flips=107880 shown_hz=119.997 window_hz=119.997
+msc=4639714 pair_gen=21574 pair_renders=21575
+draws=43150 first_eye_L=21573 first_eye_R=21573
+first_eye_L_misses=0 first_eye_R_misses=0
+missed_vblanks=0 parity_errors=0 wrong_eye=0
+wrong_hold=0 max_gap=1 pair_update_skips=0
+commit_errors=0`.
+
+The producer continued rendering ~24 stereo pairs/s, and
+KMS continually promoted fresh pairs. This is a real
+full-motion test, not a freeze or a pause.
+
+Long-run comparison:
+- 16ms gate: 3 first-right missed refreshes / ~661s;
+- 25ms gate: **0 missed refreshes / ~899s**.
+
+This is the strongest stability evidence for an age
+gate yet on this system. It does **not** mean that
+25ms guarantees scanout readiness under all load,
+resolutions or driver versions. It is still an
+empirically supported timing workaround, not an EGL
+fence or a measured GPU completion event; its actual
+video-to-photon/A-V latency is not established by the
+mpv `A-V` counter alone.
+
+Recommended: preserve `MIN_PAIR_AGE_MS=25` as the
+current provisional configuration. Prioritize:
+(1) explicit verification of GPU rendering completion
+before handing a fresh right BO to KMS using a
+fence-backed diagnostic, without blocking the KMS
+real-time thread;
+(2) detailed presentation latency measurement;
+(3) parity / missed-refresh recovery behavior before
+driving active shutter glasses by USB. There is no
+evidence from this run that increasing the age gate
+beyond 25ms is necessary.
