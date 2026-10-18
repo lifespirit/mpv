@@ -1221,3 +1221,65 @@ Next recommended *no-code* A/B experiment:
 
 The added diagnostic source has not been compiled or
 runtime tested on the target host.
+
+
+### Eleventh run: pause isolates refresh scheduling from pair rendering
+
+The user arranged an IPC pause after five seconds; the log
+`mpv-drm-stereo-pair-depth3-rt-1(8).log` confirms that pausing
+worked around video timestamp `00:00:04`, with the independent
+KMS thread continuing to flip at 119.997 Hz. This capture covers
+just **5,160 confirmed flips (~43 s)**, despite the originally
+planned 120-s pause; it is not a two-minute recording.
+
+Two one-vblank misses occurred **before pause**, both L->R and both
+`first_eye=1` on the first right-eye submission for a pair:
+- MSC 3721877, generation 4, pair_age 15.188 ms,
+  ioctl 0.110 ms, callback->submit 0.015 ms,
+  submit-after-UST -0.374620 ms;
+- MSC 3721897, generation 7, pair_age 15.357 ms,
+  ioctl 0.090 ms, callback->submit 0.014 ms,
+  submit-after-UST -0.224298 ms.
+
+By the first paused KMS report, generation and render counts
+stabilized at `pair_gen=112 pair_renders=112 draws=224`,
+while `flips` rose from 600 to 5,160, i.e. **4,560 additional
+flips / ~38s with ZERO additional misses**, and all `window_hz`
+were near 119.997Hz; `commit_errors=0`.
+
+This strongly suggests a dependency on the creation/publication/
+first scanout of new stereo pairs **or** on producer-side GPU/CPU
+activity; a pause disables both. It does **not** conclusively prove
+a GPU fence issue, because `eglWaitClient` in older A/B runs
+failed to eliminate all misses, and a zero-miss 38-s interval
+can occur statistically with the earlier observed low failure
+rate. Explicitly waiting for rendering to finish is not a
+proven fix.
+
+New optional control `MPV_DRM_STEREO_FREEZE_PAIR=1` separates
+those causes: the video continues decoding and rendering at its
+usual rate, but KMS shows only the **first** GBM stereo pair.
+The producer releases each later completed pair immediately,
+instead of publishing it to the KMS pending slot. This is not a
+pause and no per-frame rendering work is skipped. The resulting
+image stays static by design.
+
+Expected `FREEZE_PAIR=1` logs:
+- Startup: `Stereo freeze-pair A/B: rendering continues but only generation 1 will be submitted to KMS`.
+- `pair_gen=1`, `first_eye_L=1 first_eye_R=1` remain fixed;
+- `pair_renders` and `draws` **continue increasing**;
+- `flips` increases at 120 Hz.
+A truly valid control must preserve `pair_renders` activity
+without any new KMS generation/BO being handed to the scanout
+worker. Compare 120s of this mode to 120s of the normal
+`FREEZE_PAIR=0` mode with the same video.
+
+If misses persist despite static KMS BOs, investigate generic
+rendering load/CPU scheduling vs KMS. If they disappear,
+investigate the readiness of newly published GBM BOs, explicit
+fences and the first-right-eye commit path. These outcomes
+are suggestive, not proofs; repeat long runs for statistical
+confidence.
+
+The new optional A/B control has not been compiled or tested
+on the user's Intel i915 host.
