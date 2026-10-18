@@ -1008,7 +1008,8 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                 // Optional and explicitly experimental: future software
                 // renders compensate an odd number of skipped scanouts.
                 // The already-queued flip cannot be corrected here.
-                if (drm->stereo_recover && ((steps - 1) & 1u)) {
+                if (drm->stereo_recover && !drm->stereo_slot_mode &&
+                    ((steps - 1) & 1u)) {
                     drm->stereo_phase_correction ^= 1u;
                     ++drm->stereo_corrections;
                 }
@@ -1030,6 +1031,27 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                                 ((msc - drm->stereo_base_msc) & 1u);
         if (drm->stereo_flip_eye != expected_eye)
             ++drm->stereo_absolute_eye_errors;
+
+        if (drm->stereo_slot_mode) {
+            if (drm->stereo_commit_target_valid &&
+                drm->stereo_commit_target_msc != msc)
+                ++drm->stereo_target_misses;
+            // mp_time_ns is sampled when the callback is delivered, not
+            // at scanout. Keep these CPU-side delays distinct from DRM UST.
+            int64_t delivered_ns = mp_time_ns();
+            if (drm->stereo_commit_time_ns > 0 &&
+                delivered_ns > drm->stereo_commit_time_ns) {
+                int64_t delay = delivered_ns - drm->stereo_commit_time_ns;
+                drm->stereo_max_commit_callback_ns =
+                    MPMAX(drm->stereo_max_commit_callback_ns, delay);
+            }
+            if (drm->stereo_commit_draw_time_ns > 0 &&
+                delivered_ns > drm->stereo_commit_draw_time_ns) {
+                int64_t delay = delivered_ns - drm->stereo_commit_draw_time_ns;
+                drm->stereo_max_draw_callback_ns =
+                    MPMAX(drm->stereo_max_draw_callback_ns, delay);
+            }
+        }
         drm->stereo_have_flip = true;
         drm->stereo_last_eye = drm->stereo_flip_eye;
         drm->stereo_last_msc = msc;
@@ -1053,12 +1075,19 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                                              drm->stereo_last_report_absolute;
             const uint64_t window_hold = drm->stereo_wrong_hold_slots -
                                          drm->stereo_last_report_hold;
+            const uint64_t window_target_misses = drm->stereo_target_misses -
+                                                  drm->stereo_last_report_target_misses;
+            const uint64_t window_discards = drm->stereo_queue_discards -
+                                             drm->stereo_last_report_queue_discards;
             MP_INFO(drm, "DRM SBS test: flips=%llu shown_hz=%.3f "
                     "window_hz=%.3f window_missed=%llu window_parity=%llu "
                     "missed_vblanks=%llu parity_errors=%llu max_gap=%u "
                     "wrong_eye=%llu window_wrong_eye=%llu "
                     "wrong_hold=%llu window_wrong_hold=%llu "
                     "recovery=%s corrections=%llu "
+                    "slot=%s pending=%u discards=%llu window_discards=%llu "
+                    "target_misses=%llu window_target_misses=%llu "
+                    "max_commit_callback_ms=%.3f max_draw_callback_ms=%.3f "
                     "draws=%llu commit_errors=%llu msc=%u eye=%s "
                     "(video output only; USB disabled)\n",
                     (unsigned long long)drm->stereo_flips, shown_hz,
@@ -1072,8 +1101,16 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     (unsigned long long)window_absolute,
                     (unsigned long long)drm->stereo_wrong_hold_slots,
                     (unsigned long long)window_hold,
-                    drm->stereo_recover ? "on" : "off",
+                    drm->stereo_recover && !drm->stereo_slot_mode ? "on" : "off",
                     (unsigned long long)drm->stereo_corrections,
+                    drm->stereo_slot_mode ? "on" : "off",
+                    drm->stereo_queue_ahead,
+                    (unsigned long long)drm->stereo_queue_discards,
+                    (unsigned long long)window_discards,
+                    (unsigned long long)drm->stereo_target_misses,
+                    (unsigned long long)window_target_misses,
+                    drm->stereo_max_commit_callback_ns / 1000000.0,
+                    drm->stereo_max_draw_callback_ns / 1000000.0,
                     (unsigned long long)drm->stereo_draws,
                     (unsigned long long)drm->stereo_commit_errors, msc,
                     drm->stereo_flip_eye ? "R" : "L");
@@ -1082,6 +1119,10 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
             drm->stereo_last_report_parity = drm->stereo_parity_errors;
             drm->stereo_last_report_absolute = drm->stereo_absolute_eye_errors;
             drm->stereo_last_report_hold = drm->stereo_wrong_hold_slots;
+            drm->stereo_last_report_target_misses = drm->stereo_target_misses;
+            drm->stereo_last_report_queue_discards = drm->stereo_queue_discards;
+            drm->stereo_max_commit_callback_ns = 0;
+            drm->stereo_max_draw_callback_ns = 0;
             drm->stereo_max_gap = 0;
         }
     }
