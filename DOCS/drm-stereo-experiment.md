@@ -1730,12 +1730,12 @@ The existing proven 25ms age gate is deliberately still
 available as a safety fallback; `NATIVE_FENCE=0` leaves
 prior behavior unchanged.
 
-Six cumulative diagnostics were added to each
+Six cumulative counters and a mode flag were added to each
 `DRM SBS test` report:
 `native_fence=on/off`, `fence_checks`,
 `fence_promotions`, `fence_deferrals`,
 `fence_unready_L`, `fence_unready_R`,
-`fence_errors` (six counters plus the mode flag).
+`fence_errors`.
 A nonzero error counter invalidates a zero-miss result.
 
 **Controlled A/B sequence:**
