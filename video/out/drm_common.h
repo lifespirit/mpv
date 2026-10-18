@@ -171,6 +171,26 @@ struct vo_drm_state {
     uint64_t stereo_last_report_absolute, stereo_last_report_hold;
     uint64_t stereo_corrections;
 
+    // Opt-in MSC/queue-aware scheduling experiment (still NO USB).
+    // Count frames queued *after* the currently scanned-out GBM buffer.
+    bool stereo_slot_mode;
+    unsigned stereo_queue_ahead;
+    uint32_t stereo_draw_target_msc;
+    bool stereo_draw_target_valid;
+    int64_t stereo_draw_time_ns;
+
+    // Commit-to-callback diagnostics. Delivery time is not scanout time.
+    uint32_t stereo_commit_target_msc;
+    bool stereo_commit_target_valid;
+    int64_t stereo_commit_time_ns;
+    int64_t stereo_commit_draw_time_ns;
+    uint64_t stereo_target_misses;
+    uint64_t stereo_queue_discards;
+    uint64_t stereo_last_report_target_misses;
+    uint64_t stereo_last_report_queue_discards;
+    int64_t stereo_max_commit_callback_ns;
+    int64_t stereo_max_draw_callback_ns;
+
     char *card_path;
     int card_no;
     int fd;
