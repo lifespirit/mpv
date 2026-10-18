@@ -2197,3 +2197,105 @@ L and R from different movie frames. Do not
 prematurely add a FIFO without accounting for only
 three BOs per eye on these Mesa GBM surfaces and
 the active/pending/building/retired frame lifetimes.
+
+
+### Twenty-fourth run: 939s native fences, 17 pending drops, exact ages of L deferrals
+
+User log `mpv-drm-stereo-pair-depth3-rt-1(20261018-233639).log`
+(15,763 lines), Intel i915/Mesa Iris Xe TGL GT2,
+119.998Hz display, 23.976fps normal VAAPI Half-SBS
+movie playback, `NATIVE_FENCE=1`,
+`MIN_PAIR_AGE_MS=0`, `GPU_WAIT=0`,
+`FREEZE_PAIR=0`, `SCHED_FIFO=10`. The log
+contains 939 complete 120-flip reports (15m39s
+confirmed KMS output), **112,680 confirmed page
+flips**, and no clean exit message.
+
+All 939 diagnostic windows are healthy:
+`shown_hz=119.997` (window frequencies
+119.996–119.997Hz), zero `DRM SBS gap`
+events, zero `missed_vblanks`,
+`parity_errors`, `wrong_eye`, `wrong_hold`,
+`first_eye_L_misses`, `first_eye_R_misses`,
+`pair_update_skips`, `commit_errors`, or
+`fence_errors`; `max_gap=1`. The highest
+reported `max_commit_callback_ms=9.158`ms,
+with no 16.6ms callback outlier.
+
+At final report: `pair_gen=22534`,
+`pair_renders=22535`, `draws=45070`,
+`first_eye_L=22517`, `first_eye_R=22517`,
+`pair_unpresented_discards=17` (17/22535
+= **0.0754%** of generated pairs),
+`fence_checks=43138`,
+`fence_promotions=22516`,
+`fence_deferrals=20621`,
+`fence_unready_L=11110`,
+`fence_unready_R=20621`,
+`fence_errors=0`.
+The first-eye submission age from pair publication:
+L min/avg/max=**3.223/26.267/41.030ms**;
+R min/avg/max=**11.244/34.591/49.272ms**.
+These are CPU publication-to-atomic-submit ages,
+**not optical/image or calibrated A-V delay**.
+
+The 17 event-level records all show
+`reason=newer_generation`, and **all 17**
+have `fence_L=1 fence_R=1` at the time of
+producer-side replacement. **Every one** has
+exactly two earlier unsuccessful eligible left-eye
+fence checks (`left_boundary_fence_deferrals=2`).
+New timestamps locate these failures very tightly:
+
+- first L-boundary deferral: pair age
+  **7.570–15.313ms** (median 15.185ms);
+- second L-boundary deferral: pair age
+  **24.239–31.978ms** (median 31.857ms);
+- pending overwritten: age
+  **34.205–42.014ms** (median 41.729ms);
+- age difference from *last* failed check to
+  overwrite **9.690–10.218ms** (mean 9.912ms).
+- Typical failed pair 369: first deferral
+  **15.304ms**, second **31.890ms**, both
+  GPU fences signal by producer-side overwrite
+  at **41.861ms**; its last failed target MSC
+  was `5563681`.
+
+Thus the troublesome window is now well localized:
+the pair is not fully fence-ready at two successive
+left-eye promotion opportunities, 16.67ms apart,
+but becomes fence-ready **sometime within the
+following ~10ms**, before the source-frame cadence
+(~41.71ms) replaces it. Another right-eye vblank
+at +8.33ms lies within this gap, but the code
+deliberately must not promote a fresh pair on
+right-eye boundaries (would mismatch generations
+between eyes). This pinpoints a *fence-vs-L-boundary*
+phase issue combined with one-slot pending
+replacement; it does not prove an exact GPU
+completion timestamp, nor show that increasing
+GBM buffer count is currently safe.
+
+**Next suggested instrumentation:** in the independent
+KMS worker, on right-eye boundaries ONLY for
+already twice-deferred pending pairs, perform
+a diagnostic, nonblocking poll of both fences.
+Record whether the pair became ready at that
+intermediate right-eye event and the corresponding
+CPU age / target MSC, without promoting it.
+This distinguishes a fence completion before
+the R event (~8.33ms after the last L failure)
+from completion later, and adds no GPU wait.
+Such a diagnostic is preferable to blindly adding
+a deeper pair queue to the current GBM surfaces.
+Additional out-of-band GPU fence timestamps could
+narrow this interval further if needed.
+
+Comparative zero-miss native-fence-only runs:
+694s/0 missed vblanks;
+882s/0 with 25 pending drops;
+867s/0 with 18 drops;
+939s/0 with 17 drops. More important than the
+KMS success alone is separately quantifying the
+~0.08–0.12% staging-pair losses before planning
+active shutter glasses.
