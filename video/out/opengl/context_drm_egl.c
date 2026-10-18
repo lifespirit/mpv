@@ -441,13 +441,11 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
     }
     enqueue_bo(ctx, new_bo);
 
-    // After a recovery discard, the queue can be below the configured
-    // swapchain depth. Do not wait for the queue to refill: that would
-    // deliberately miss another vblank. Submit at least one waiting BO
-    // per call once the first hardware page flip has established MSC.
-    bool force_flip = drm->stereo_slot_mode && drm->stereo_have_flip &&
-                      p->gbm.num_bos > 1;
-    while (force_flip || drm->redraw ||
+    // Keep the original GBM pipelined queue pressure rules. In
+    // particular, do NOT force a flip and immediately wait for its
+    // callback on every draw: that serializes GPU rendering with KMS,
+    // defeating --swapchain-depth and cutting throughput to ~60 Hz.
+    while (drm->redraw ||
            p->gbm.num_bos > ctx->vo->opts->swapchain_depth ||
            !gbm_surface_has_free_buffers(p->gbm.surface)) {
         if (drm->waiting_for_flip) {
@@ -462,17 +460,12 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
             continue;
         }
         stereo_align_pending(ctx);
-        if (p->gbm.num_bos > 1) {
+        if (p->gbm.num_bos > 1)
             queue_flip(ctx, p->gbm.bo_queue[1]);
-            force_flip = false;
-        }
     }
-    // The MSC predictor must not inspect queue depth while a submitted
-    // atomic commit is still in flight.
-    if (drm->stereo_slot_mode && drm->waiting_for_flip) {
-        vo_drm_wait_on_flip(drm);
-        swapchain_step(ctx);
-    }
+    // Keep the real GBM queue length (including any in-flight BO) as
+    // input to the future-MSC estimator; consuming the current flip
+    // here would collapse the render/scanout pipeline.
     if (drm->stereo_test_enabled)
         drm->stereo_queue_ahead = p->gbm.num_bos > 0 ? p->gbm.num_bos - 1 : 0;
     drm->redraw = false;
