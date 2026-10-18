@@ -516,6 +516,8 @@ static void *stereo_kms_thread(void *arg)
     struct stereo_kms *s = &p->stereo;
     struct vo_drm_state *drm = ctx->vo->drm;
     uint64_t errors = 0;
+    unsigned consecutive_errors = 0;
+    bool first_commit_logged = false;
 
     while (true) {
         pthread_mutex_lock(&s->mutex);
@@ -573,6 +575,14 @@ static void *stereo_kms_thread(void *arg)
         }
         struct stereo_pair old = {0};
         if (!ret) {
+            consecutive_errors = 0;
+            if (!first_commit_logged) {
+                MP_INFO(ctx, "Stereo KMS first atomic flip submitted: "
+                        "eye=%c fb_id=%u generation=%llu\n",
+                        eye ? 'R' : 'L', fb->id,
+                        (unsigned long long)selected->generation);
+                first_commit_logged = true;
+            }
             if (promote) {
                 old = s->active;
                 s->active = s->pending;
@@ -589,15 +599,23 @@ static void *stereo_kms_thread(void *arg)
         } else {
             drm->stereo_commit_errors++;
             errors++;
+            consecutive_errors++;
             if (errors <= 5 || errors % 120 == 0)
                 MP_WARN(ctx, "Stereo KMS flip failed: fb_prop=%d "
                         "crtc_prop=%d commit_rc=%d errno=%d (%s)\n",
                         fb_property, crtc_property, ret,
                         failed_errno, mp_strerror(failed_errno));
+            if (consecutive_errors >= 60) {
+                MP_ERR(ctx, "Stereo KMS stopped after 60 consecutive atomic "
+                        "flip failures (video scanout unavailable)\n");
+                s->stop = true;
+            }
         }
         pthread_mutex_unlock(&s->mutex);
 
         if (ret) {
+            if (consecutive_errors >= 60)
+                break;
             usleep(3000);
             continue;
         }
