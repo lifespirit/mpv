@@ -1021,11 +1021,12 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                 MP_WARN(drm, "DRM SBS gap: skipped=%u refreshes msc=%u "
                         "previous_msc=%u old_eye=%s incoming_eye=%s "
                         "submit_after_callback_ms=%.3f "
-                        "commit_callback_ms=%.3f\n",
+                        "atomic_ioctl_ms=%.3f commit_callback_ms=%.3f\n",
                         steps - 1, msc, drm->stereo_last_msc,
                         drm->stereo_last_eye ? "R" : "L",
                         drm->stereo_flip_eye ? "R" : "L",
                         drm->stereo_commit_after_callback_ns / 1000000.0,
+                        drm->stereo_commit_ioctl_ns / 1000000.0,
                         commit_callback_ms);
             }
             if (steps == 0 || steps >= 1000 ||
@@ -1098,6 +1099,7 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     "target_misses=%llu window_target_misses=%llu "
                     "max_commit_callback_ms=%.3f max_draw_callback_ms=%.3f "
                     "max_submit_after_callback_ms=%.3f "
+                    "max_atomic_ioctl_ms=%.3f "
                     "pair=%s pair_gen=%llu pair_renders=%llu "
                     "pair_reuse_flips=%llu pair_update_skips=%llu "
                     "pair_seq=%s pair_catchups=%llu "
@@ -1127,6 +1129,7 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     drm->stereo_max_commit_callback_ns / 1000000.0,
                     drm->stereo_max_draw_callback_ns / 1000000.0,
                     drm->stereo_max_submit_after_callback_ns / 1000000.0,
+                    drm->stereo_max_commit_ioctl_ns / 1000000.0,
                     drm->stereo_pair_mode ? "on" : "off",
                     (unsigned long long)drm->stereo_pair_display_generation,
                     (unsigned long long)drm->stereo_pair_rendered,
@@ -1150,6 +1153,7 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
             drm->stereo_max_commit_callback_ns = 0;
             drm->stereo_max_draw_callback_ns = 0;
             drm->stereo_max_submit_after_callback_ns = 0;
+            drm->stereo_max_commit_ioctl_ns = 0;
             drm->stereo_max_gpu_wait_ns = 0;
             drm->stereo_queue_peak = 0;
             drm->stereo_max_gap = 0;
