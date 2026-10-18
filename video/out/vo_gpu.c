@@ -31,6 +31,7 @@
 #include "misc/bstr.h"
 #include "common/msg.h"
 #include "options/m_config.h"
+#include "osdep/timer.h"
 #include "vo.h"
 #include "video/mp_image.h"
 #include "sub/osd.h"
@@ -100,8 +101,22 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         // gl_video_resize() every 8.33ms: that resets the GPU caches.
         int eye = p->stereo_draw_count & 1;
 #if HAVE_DRM
-        if (vo->drm->stereo_recover)
-            eye ^= vo->drm->stereo_phase_correction;
+        struct vo_drm_state *drm = vo->drm;
+        drm->stereo_draw_target_valid = false;
+        if (drm->stereo_slot_mode && drm->stereo_have_flip) {
+            // The GBM queue contains the current scanout followed by
+            // already-rendered buffers. Predict the MSC of this *new*
+            // buffer, not the MSC of the current draw callback.
+            const uint32_t target = drm->stereo_last_msc +
+                                    drm->stereo_queue_ahead + 1u;
+            eye = drm->stereo_base_eye ^
+                  ((target - drm->stereo_base_msc) & 1u);
+            drm->stereo_draw_target_msc = target;
+            drm->stereo_draw_target_valid = true;
+        } else if (drm->stereo_recover && !drm->stereo_slot_mode) {
+            eye ^= drm->stereo_phase_correction;
+        }
+        drm->stereo_draw_time_ns = mp_time_ns();
 #endif
         gl_video_set_sbs_eye(p->renderer, p->stereo_full_src, eye);
 #if HAVE_DRM
@@ -375,9 +390,13 @@ static int preinit(struct vo *vo)
         vo->drm->stereo_last_eye = -1;
         const char *recover = getenv("MPV_DRM_STEREO_RECOVER");
         vo->drm->stereo_recover = recover && strcmp(recover, "1") == 0;
-        MP_INFO(vo, "Experimental DRM SBS L/R alternation at %.3f Hz "
-                "(NO USB, hardware phase recovery %s)\n",
-                hz, vo->drm->stereo_recover ? "on" : "off");
+        const char *slot = getenv("MPV_DRM_STEREO_SLOT");
+        vo->drm->stereo_slot_mode = slot && strcmp(slot, "1") == 0;
+        MP_INFO(vo, "Experimental DRM SBS L/R at %.3f Hz "
+                "(NO USB, MSC slot scheduler %s, legacy phase recovery %s)\n",
+                hz, vo->drm->stereo_slot_mode ? "on" : "off",
+                vo->drm->stereo_recover && !vo->drm->stereo_slot_mode
+                    ? "on" : "off");
 #else
         MP_ERR(vo, "MPV_DRM_STEREO_SBS=1 was built without DRM support\n");
         goto err_out;
