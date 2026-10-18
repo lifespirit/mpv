@@ -1927,3 +1927,49 @@ Then run >=15 minutes with `NATIVE_FENCE=1`,
 watching both flip misses and actual pair generations
 shown. Retain the empirically supported 25ms fallback
 until the fence-only mode is validated more broadly.
+
+
+### Next instrumentation: count pending-pair discards and first-eye ages
+
+After the zero-miss 694s native-fence-only run, added
+lightweight diagnostic counters to distinguish perfect
+120Hz *eye alternation* from possible missing 24fps
+*source video frames*. This requires a new build;
+the 694s user log predates these counters.
+
+At every one-second `DRM SBS test` report:
+- `pair_unpresented_discards`: counts complete pending
+  stereo generations explicitly discarded on the producer
+  before any KMS first-L promotion (either superseded by
+  the next generation or released to relieve GBM pressure).
+  This is a cumulative *KMS staging-pair loss* count, not
+  necessarily an mpv decoder drop or a visible duplicate;
+- `first_age_L_min_ms/avg_ms/max_ms` and
+  `first_age_R_min_ms/avg_ms/max_ms`: cumulative elapsed
+  CPU time between publication of a full L/R pair and
+  submission of the first L or R atomic page flip using
+  that pair. **Not optical presentation time**, GPU
+  rendering time or calibrated video/audio latency.
+  Collected only once per eye per promoted pair.
+
+The metrics are independent of the native-fence setting
+and do not change KMS flipping/pacing. The existing
+`fence_deferrals` counter is a count of unsuccessful
+poll checks, which is *not* a dropped-frame count.
+
+The source edits are in `video/out/drm_common.h`,
+`video/out/opengl/context_drm_egl.c`, and
+`video/out/drm_common.c`. Their consistency and braces
+were checked; a compile on the user's Arch Linux host
+remains necessary.
+
+Next A/B: `NATIVE_FENCE=1` and
+`MIN_PAIR_AGE_MS=0` with normal playback for
+~15min; examine `pair_unpresented_discards`,
+first-eye age distributions, `fence_errors`,
+`missed_vblanks` and `pair_gen`. Under full-rate
+24fps playback, expect around 24 `pair_renders`
+per second; some staging-pair drops may occur with
+a nonblocking fence gate, even with zero KMS misses.
+Do not confuse those events with missed 120Hz eye
+alternation.
