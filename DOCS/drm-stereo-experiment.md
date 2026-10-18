@@ -2073,3 +2073,47 @@ safe additional ready/pending queue would improve
 frame completeness and average latency; do not
 enable USB shutters based solely on user-space
 phase correctness.
+
+
+### Native-fence pending-drop event log (following run 22)
+
+A subsequent opt-in diagnostic change to
+`context_drm_egl.c` logs each of the first 40 cases where
+a previously prepared complete `pending` stereo pair
+is discarded without reaching first-L KMS submission,
+then every 100th subsequent event to bound logging.
+Each `Stereo unpresented pair discarded:` line
+contains:
+- `reason=newer_generation` when the producer
+  replaced the unpublished pair with another fully
+  prepared generation, or `reason=gbm_pressure` when
+  it freed pending BOs to permit further rendering;
+- `pending_gen`, `active_gen`, and the
+  `pending_age_ms` CPU time since both eyes were
+  published;
+- the nonblocking `fence_L` and `fence_R` state
+  at the actual discard (1=signaled, 0=unsignaled,
+  -1=unavailable or poll error);
+- `left_boundary_fence_deferrals`, how many L
+  promotion opportunities found this specific
+  pending generation not ready.
+
+These probes are performed only at uncommon
+producer-side pair discard points while already
+holding the pair mutex, and do not modify the
+real-time KMS submit path or spin-wait on GPU.
+The existing `pair_unpresented_discards` cumulative
+counter remains incremented exactly once per
+discard. A signaled fence *at discard time* does
+not prove the fence was ready at the earlier
+promotion attempt.
+
+Next run with native fences enabled and age gate
+0ms for ~10–15min. Analyze whether discards
+mostly occur because of still-unready right fences
+or because a now-ready pending frame missed its
+L-boundary window. This determines whether to
+improve producer phase/queue capacity vs scheduling
+new KMS atomic FBs with explicit plane fences.
+The patch was source-reviewed but not compiled
+on the target user's Intel host.
