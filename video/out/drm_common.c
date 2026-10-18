@@ -986,6 +986,41 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
     struct vo_drm_state *drm = data;
 
     int64_t ust = MP_TIME_S_TO_NS(sec) + MP_TIME_US_TO_NS(usec);
+    if (drm->stereo_test_enabled && drm->stereo_flip_eye >= 0) {
+        // This callback confirms a real KMS flip. The timestamp is NOT
+        // the time when our draw_frame() callback was invoked.
+        const uint64_t when_us = (uint64_t)sec * 1000000u + usec;
+        if (drm->stereo_have_flip) {
+            const uint32_t steps = msc - drm->stereo_last_msc;
+            if (steps > 1 && steps < 1000)
+                drm->stereo_missed_slots += steps - 1;
+            if (steps == 0 || steps >= 1000 ||
+                    (drm->stereo_flip_eye ^ drm->stereo_last_eye) != (steps & 1))
+                ++drm->stereo_parity_errors;
+        } else {
+            drm->stereo_window_first_ust_us = when_us;
+        }
+        drm->stereo_have_flip = true;
+        drm->stereo_last_eye = drm->stereo_flip_eye;
+        drm->stereo_last_msc = msc;
+        drm->stereo_last_ust_us = when_us;
+        ++drm->stereo_flips;
+        if (drm->stereo_flips % 120 == 0) {
+            const uint64_t elapsed_us = when_us - drm->stereo_window_first_ust_us;
+            const double shown_hz = elapsed_us > 0
+                ? (drm->stereo_flips - 1) * 1000000.0 / elapsed_us : 0.0;
+            MP_INFO(drm, "DRM SBS test: flips=%llu shown_hz=%.3f "
+                    "missed_vblanks=%llu parity_errors=%llu "
+                    "draws=%llu commit_errors=%llu msc=%u eye=%s "
+                    "(video output only; USB disabled)\n",
+                    (unsigned long long)drm->stereo_flips, shown_hz,
+                    (unsigned long long)drm->stereo_missed_slots,
+                    (unsigned long long)drm->stereo_parity_errors,
+                    (unsigned long long)drm->stereo_draws,
+                    (unsigned long long)drm->stereo_commit_errors, msc,
+                    drm->stereo_flip_eye ? "R" : "L");
+        }
+    }
     present_sync_update_values(drm->present, ust, msc);
     present_sync_swap(drm->present);
     drm->waiting_for_flip = false;
