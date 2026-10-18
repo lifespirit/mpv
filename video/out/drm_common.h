@@ -192,6 +192,16 @@ struct vo_drm_state {
     int64_t stereo_max_commit_callback_ns;
     int64_t stereo_max_draw_callback_ns;
 
+    // Opt-in dual-surface producer / independent DRM vblank scanout.
+    // Stereo pair operations are implemented by the drm EGL context.
+    bool stereo_pair_mode;
+    int stereo_capture_eye;
+    uint64_t stereo_capture_generation;
+    uint64_t stereo_pair_rendered;
+    uint64_t stereo_pair_display_generation;
+    uint64_t stereo_pair_repeated_flips;
+    uint64_t stereo_pair_update_skips;
+
     char *card_path;
     int card_no;
     int fd;
@@ -216,5 +226,11 @@ void vo_drm_wakeup(struct vo *vo);
 
 bool vo_drm_acquire_crtc(struct vo_drm_state *drm);
 void vo_drm_release_crtc(struct vo_drm_state *drm);
+
+// Only valid for --gpu-context=drm and MPV_DRM_STEREO_PAIR=1.
+// The EGL context remains owned by the VO/rendering thread.
+struct ra_ctx;
+bool vo_drm_stereo_pair_begin_eye(struct ra_ctx *ctx, int eye);
+bool vo_drm_stereo_pair_can_capture(struct ra_ctx *ctx);
 
 #endif
