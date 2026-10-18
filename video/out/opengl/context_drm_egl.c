@@ -535,7 +535,8 @@ static void stereo_drain_retired(struct ra_ctx *ctx)
 static void stereo_stamp_submit_phase(struct vo_drm_state *drm)
 {
     drm->stereo_prev_callback_lag_ns = drm->stereo_last_callback_lag_ns;
-    drm->stereo_submit_after_ust_ns = -1;
+    drm->stereo_prev_callback_lag_valid = drm->stereo_callback_lag_valid;
+    drm->stereo_submit_after_ust_valid = false;
     if (!drm->stereo_ust_monotonic || !drm->stereo_have_flip)
         return;
 
@@ -546,9 +547,13 @@ static void stereo_stamp_submit_phase(struct vo_drm_state *drm)
     int64_t cpu_ns = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec;
     int64_t submit_after_ust_ns =
         cpu_ns - (int64_t)drm->stereo_last_ust_us * 1000LL;
-    if (submit_after_ust_ns < 0 || submit_after_ust_ns >= 1000000000LL)
-        return;
+    // Preserve signed elapsed time, including cases where DRM reports
+    // a timestamp *ahead of* the userspace clock. Previous code replaced
+    // all negative samples with -1ns, obscuring the gap root cause.
     drm->stereo_submit_after_ust_ns = submit_after_ust_ns;
+    drm->stereo_submit_after_ust_valid = true;
+    drm->stereo_min_submit_after_ust_ns =
+        MPMIN(drm->stereo_min_submit_after_ust_ns, submit_after_ust_ns);
     drm->stereo_max_submit_after_ust_ns =
         MPMAX(drm->stereo_max_submit_after_ust_ns, submit_after_ust_ns);
 }
@@ -1238,9 +1243,9 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     p->stereo.legacy_mode = p->stereo.enabled && legacy &&
                             strcmp(legacy, "1") == 0;
     drm->stereo_pair_legacy_mode = p->stereo.legacy_mode;
-    drm->stereo_last_callback_lag_ns = -1;
-    drm->stereo_prev_callback_lag_ns = -1;
-    drm->stereo_submit_after_ust_ns = -1;
+    drm->stereo_callback_lag_valid = false;
+    drm->stereo_prev_callback_lag_valid = false;
+    drm->stereo_submit_after_ust_valid = false;
     if (p->stereo.enabled) {
         uint64_t timestamp_monotonic = 0;
         int rc = drmGetCap(drm->fd, DRM_CAP_TIMESTAMP_MONOTONIC,
