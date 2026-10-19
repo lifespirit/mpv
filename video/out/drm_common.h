@@ -279,6 +279,13 @@ struct vo_drm_state {
     uint64_t stereo_pair_update_skips;
     // Pairs replaced/dropped while pending, before their first KMS flip.
     uint64_t stereo_pair_unpresented_discards;
+    // Cheap producer-side aggregate diagnostics: no fence poll or log call
+    // while holding stereo.mutex in quiet mode.
+    uint64_t stereo_pair_drop_newer, stereo_pair_drop_gbm_pressure;
+    uint64_t stereo_pair_drop_deferrals[4]; // 0, 1, 2, >=3 L attempts
+    uint64_t stereo_pair_drop_age_samples;
+    int64_t stereo_pair_drop_age_sum_ns;
+    int64_t stereo_pair_drop_age_min_ns, stereo_pair_drop_age_max_ns;
 
     // Submitted generation metadata, transferred atomically from stereo_pair
     // while KMS submits the FB. The callback runs only for the in-flight flip.
