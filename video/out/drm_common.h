@@ -114,6 +114,9 @@ struct drm_opts {
     bool stereo_3d;
 };
 
+// Shared option group, also queried by vo_gpu's DRM stereo startup.
+extern const struct m_sub_options drm_conf;
+
 struct vt_switcher {
     int tty_fd;
     struct mp_log *log;
