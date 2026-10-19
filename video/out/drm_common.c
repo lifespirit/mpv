@@ -105,6 +105,8 @@ const struct m_sub_options drm_conf = {
         {"drm-vrr-enabled", OPT_CHOICE(vrr_enabled,
             {"no", 0}, {"yes", 1}, {"auto", -1})},
         {"drm-stereo-3d", OPT_BOOL(stereo_3d)},
+        {"drm-stereo-pacing-eye", OPT_CHOICE(stereo_pacing_eye,
+            {"left", 0}, {"right", 1})},
         {0},
     },
     .defaults = &(const struct drm_opts) {
@@ -1109,6 +1111,8 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
         drm->stereo_last_eye = drm->stereo_flip_eye;
         drm->stereo_last_msc = msc;
         drm->stereo_last_ust_us = when_us;
+        if (drm->stereo_pair_mode && drm->stereo_flip_eye == 0)
+            drm->stereo_last_left_ust_us = when_us;
         ++drm->stereo_flips;
         if (drm->stereo_flips % 120 == 0) {
             const uint64_t elapsed_us = when_us - drm->stereo_window_first_ust_us;
@@ -1253,20 +1257,27 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
             drm->stereo_max_gap = 0;
         }
     }
-    // The physical KMS clock always advances at 120Hz, but the paired
-    // shutter mode presents one complete film-picture opportunity per L/R
-    // cycle. Feed mpv only the confirmed L boundaries with a *logical* MSC.
-    // This matters as much as reporting half the FPS: present_sync derives
-    // its vsync_duration from the delta between UST and MSC, and otherwise
-    // the VO could re-estimate the physical 120Hz and break display sync.
+    // The physical KMS clock always runs at 120Hz, but mpv sees one
+    // complete L/R cycle as a single 60Hz logical display refresh.
+    // Normally VO wakeup/feedback occurs at L; experimental R pacing
+    // shifts only the producer's wakeup phase by one physical refresh.
+    // Always feed the *preceding L* UST to mpv, even when the callback
+    // that wakes the VO is R, because new film generations begin on L.
     //
-    // The raw physical MSC and all parity/missed-flip diagnostics above are
-    // deliberately left unchanged.
+    // Use an incrementing logical MSC for the presentation feedback:
+    // passing raw every-second physical MSC would incorrectly estimate
+    // 120Hz based on the 16.67ms L/L (or R/R) interval.
+    // Physical MSC, eye parity, and error diagnostics remain unchanged.
     bool logical_stereo = drm->opts && drm->opts->stereo_3d &&
                           drm->stereo_pair_mode;
-    if (!logical_stereo || drm->stereo_flip_eye == 0) {
+    int pacing_eye = logical_stereo ? drm->opts->stereo_pacing_eye : 0;
+    if (!logical_stereo || drm->stereo_flip_eye == pacing_eye) {
         int64_t presentation_msc = logical_stereo ? ((int64_t)msc / 2) : msc;
-        present_sync_update_values(drm->present, ust, presentation_msc);
+        int64_t presentation_ust = ust;
+        if (logical_stereo && pacing_eye == 1 && drm->stereo_last_left_ust_us)
+            presentation_ust = MP_TIME_US_TO_NS(drm->stereo_last_left_ust_us);
+        present_sync_update_values(drm->present, presentation_ust,
+                                   presentation_msc);
         present_sync_swap(drm->present);
     }
     // End-of-callback CPU clock, distinct from KMS's hardware UST.
