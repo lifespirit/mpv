@@ -104,6 +104,7 @@ const struct m_sub_options drm_conf = {
         {"drm-draw-surface-size", OPT_SIZE_BOX(draw_surface_size)},
         {"drm-vrr-enabled", OPT_CHOICE(vrr_enabled,
             {"no", 0}, {"yes", 1}, {"auto", -1})},
+        {"drm-stereo-3d", OPT_FLAG(stereo_3d)},
         {0},
     },
     .defaults = &(const struct drm_opts) {
@@ -1252,8 +1253,22 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
             drm->stereo_max_gap = 0;
         }
     }
-    present_sync_update_values(drm->present, ust, msc);
-    present_sync_swap(drm->present);
+    // The physical KMS clock always advances at 120Hz, but the paired
+    // shutter mode presents one complete film-picture opportunity per L/R
+    // cycle. Feed mpv only the confirmed L boundaries with a *logical* MSC.
+    // This matters as much as reporting half the FPS: present_sync derives
+    // its vsync_duration from the delta between UST and MSC, and otherwise
+    // the VO could re-estimate the physical 120Hz and break display sync.
+    //
+    // The raw physical MSC and all parity/missed-flip diagnostics above are
+    // deliberately left unchanged.
+    bool logical_stereo = drm->opts && drm->opts->stereo_3d &&
+                          drm->stereo_pair_mode;
+    if (!logical_stereo || drm->stereo_flip_eye == 0) {
+        int64_t presentation_msc = logical_stereo ? ((int64_t)msc / 2) : msc;
+        present_sync_update_values(drm->present, ust, presentation_msc);
+        present_sync_swap(drm->present);
+    }
     // End-of-callback CPU clock, distinct from KMS's hardware UST.
     drm->stereo_last_callback_cpu_ns = mp_time_ns();
     drm->waiting_for_flip = false;
@@ -1284,6 +1299,10 @@ int vo_drm_control(struct vo *vo, int *events, int request, void *arg)
         double fps = vo_drm_get_display_fps(drm);
         if (fps <= 0)
             break;
+        // --drm-stereo-3d changes mpv's *logical* presentation cadence,
+        // never the hardware mode or the physical L/R KMS flip cadence.
+        if (drm->opts && drm->opts->stereo_3d)
+            fps /= 2.0;
         *(double*)arg = fps;
         return VO_TRUE;
     }
