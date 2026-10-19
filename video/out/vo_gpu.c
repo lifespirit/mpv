@@ -424,12 +424,25 @@ static int preinit(struct vo *vo)
 
     gl_video_init_hwdecs(p->renderer, p->ctx, vo->hwdec_devs, false);
 
-    // Only the direct DRM/EGL backend can provide KMS flip events.
-    // This is deliberately not a generic Wayland/X11 stereo mode.
+    // Public mpv option enables BOTH Half-SBS eye rendering and paired
+    // KMS scanout; retain the old experiment variables for A/B comparison.
+    // Explicitly reject non-DRM contexts instead of silently ignoring 3D.
+    bool native_3d = false;
+#if HAVE_DRM
+    struct drm_opts *drm_opts = mp_get_config_group(vo, vo->global, &drm_conf);
+    native_3d = drm_opts->stereo_3d;
+    talloc_free(drm_opts);
+    if (native_3d && (!vo->drm || strcmp(p->ctx->fns->name, "drm") != 0)) {
+        MP_ERR(vo, "--drm-stereo-3d=yes requires --gpu-context=drm\n");
+        goto err_out;
+    }
+#endif
     const char *stereo_env = getenv("MPV_DRM_STEREO_SBS");
-    p->stereo_test = stereo_env && strcmp(stereo_env, "1") == 0;
+    p->stereo_test = native_3d ||
+        (stereo_env && strcmp(stereo_env, "1") == 0);
     const char *pair_env = getenv("MPV_DRM_STEREO_PAIR");
-    p->stereo_pair = pair_env && strcmp(pair_env, "1") == 0;
+    p->stereo_pair = native_3d ||
+        (pair_env && strcmp(pair_env, "1") == 0);
     if (p->stereo_pair && !p->stereo_test) {
         MP_ERR(vo, "MPV_DRM_STEREO_PAIR requires MPV_DRM_STEREO_SBS=1\n");
         goto err_out;
@@ -460,6 +473,11 @@ static int preinit(struct vo *vo)
                 "(NO USB, independent paired KMS scanout %s, slot=%s)\n",
                 hz, p->stereo_pair ? "on" : "off",
                 vo->drm->stereo_slot_mode ? "on" : "off");
+        if (native_3d)
+            MP_INFO(vo, "DRM stereo 3D: physical %.3f Hz L/R, "
+                    "logical %.3f Hz L-only player pacing and "
+                    "presentation feedback (native GPU fences on)\n",
+                    hz, hz / 2.0);
 #else
         MP_ERR(vo, "MPV_DRM_STEREO_SBS=1 was built without DRM support\n");
         goto err_out;
