@@ -1134,32 +1134,81 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
             } else {
                 const double pts = drm->stereo_submit_media_pts;
                 const uint64_t id = drm->stereo_submit_frame_id;
+                const int plan = drm->stereo_submit_planned_vsyncs;
+                const bool synced = drm->stereo_submit_display_synced;
+
+                // The schedule attached to this frame describes the frame's
+                // future hold. Its accuracy can only be assessed when the
+                // NEXT source frame reaches its first confirmed L. Compare
+                // the last presented frame's original plan with this
+                // first-L-to-first-L delta, never this frame's new plan.
+                if (synced) {
+                    if (plan >= 0)
+                        drm->stereo_plan_requested_hist[MPMIN(plan, 4)]++;
+                    else
+                        drm->stereo_plan_invalid++;
+                } else {
+                    drm->stereo_plan_nondisplay++;
+                }
+
                 uint32_t cycles = 0;
+                uint64_t frame_id_gap = 0;
+                int previous_plan = -1;
+                bool plan_comparable = false;
                 bool reset = !drm->stereo_pts_valid_L;
                 if (!reset) {
                     // Seek/reconfig or source PTS discontinuity: start a
-                    // new relative anchor, never accumulate stale drift.
+                    // new relative anchor, never accumulate stale drift or
+                    // compare a prior picture's hold across that boundary.
                     if (id <= drm->stereo_pts_last_frame_id ||
                         pts < drm->stereo_pts_last_media_pts - 0.100 ||
                         pts > drm->stereo_pts_last_media_pts + 5.0) {
                         reset = true;
                     } else {
                         uint32_t delta_msc = msc - drm->stereo_pts_last_msc;
-                        if (delta_msc > 0 && delta_msc < 1000 &&
-                            (delta_msc & 1u) == 0)
+                        bool valid_msc = delta_msc > 0 && delta_msc < 1000 &&
+                                         (delta_msc & 1u) == 0;
+                        if (valid_msc) {
                             cycles = delta_msc / 2u;
-                        if (cycles == 1)
-                            drm->stereo_pts_cycles_1++;
-                        else if (cycles == 2)
-                            drm->stereo_pts_cycles_2++;
-                        else if (cycles == 3)
-                            drm->stereo_pts_cycles_3++;
-                        else if (cycles >= 4)
-                            drm->stereo_pts_cycles_4plus++;
+                            if (cycles == 1)
+                                drm->stereo_pts_cycles_1++;
+                            else if (cycles == 2)
+                                drm->stereo_pts_cycles_2++;
+                            else if (cycles == 3)
+                                drm->stereo_pts_cycles_3++;
+                            else if (cycles >= 4)
+                                drm->stereo_pts_cycles_4plus++;
+                        } else {
+                            drm->stereo_plan_invalid_msc++;
+                        }
+                        if (id > drm->stereo_pts_last_frame_id + 1) {
+                            frame_id_gap = id - drm->stereo_pts_last_frame_id - 1;
+                            drm->stereo_pts_id_gaps += frame_id_gap;
+                            drm->stereo_plan_skipped_intervals++;
+                            drm->stereo_plan_skipped_ids += frame_id_gap;
+                        }
 
-                        if (id > drm->stereo_pts_last_frame_id + 1)
-                            drm->stereo_pts_id_gaps +=
-                                id - drm->stereo_pts_last_frame_id - 1;
+                        // A multi-frame interval is NOT an accurate hold
+                        // measurement of the preceding frame, as the missing
+                        // pictures' requested durations are unknown here.
+                        // This conditional comparison intentionally excludes
+                        // those intervals and any invalid schedule metadata.
+                        plan_comparable = valid_msc && !frame_id_gap &&
+                            synced && drm->stereo_pts_last_display_synced &&
+                            drm->stereo_pts_last_planned_vsyncs >= 0;
+                        if (plan_comparable) {
+                            previous_plan = drm->stereo_pts_last_planned_vsyncs;
+                            drm->stereo_plan_comparisons++;
+                            if (cycles == previous_plan)
+                                drm->stereo_plan_exact++;
+                            int64_t difference = (int64_t)cycles -
+                                                 previous_plan;
+                            drm->stereo_plan_signed_error_cycles += difference;
+                            drm->stereo_plan_abs_error_cycles +=
+                                difference < 0 ? -difference : difference;
+                            drm->stereo_plan_matrix[MPMIN(previous_plan, 4)]
+                                                   [MPMIN(cycles, 4u)]++;
+                        }
                     }
                 }
                 if (reset) {
@@ -1200,6 +1249,8 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                 drm->stereo_pts_last_media_pts = pts;
                 drm->stereo_pts_last_frame_id = id;
                 drm->stereo_pts_last_msc = msc;
+                drm->stereo_pts_last_planned_vsyncs = plan;
+                drm->stereo_pts_last_display_synced = synced;
 
                 // Bounded history: first 8 frames and one per 120 movie
                 // pictures (~5 seconds at 23.976 FPS), plus a segment
@@ -1218,6 +1269,11 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                             .media_pts = pts,
                             .relative_drift_ms = relative_ms,
                             .cycles_since_previous = cycles,
+                            .planned_vsyncs = plan,
+                            .display_synced = synced,
+                            .previous_planned_vsyncs = previous_plan,
+                            .frame_id_gap = frame_id_gap,
+                            .plan_comparable = plan_comparable,
                         };
                 }
             }
