@@ -3122,3 +3122,147 @@ movie-frame drops, instead of optimizing only
 buffer retention. Avoid assuming the
 R-pacing improvement alone establishes
 correct PTS-to-photon latency.
+
+
+### Thirty-second implementation: vo_frame ID + media PTS to confirmed first L scanout
+
+This change is ready for compilation and a 15-minute
+native-stereo quiet-mode trial on the user's Intel DRM
+device. It adds **observability only**; the KMS
+worker's L/R selection, native-fence checks,
+pair promotion conditions and mpv 60Hz logical
+frame scheduling are not changed.
+
+**Three distinct time/identity domains:**
+- `vo_frame.frame_id` is mpv's nonzero stable
+  identity for the current `vo_frame` image
+  (unchanged on repeat/redraw). It comes from
+  `video/out/vo.c` queueing and is NOT
+  `stereo_pair.generation`.
+- `vo_frame.pts` is the mpv **realtime**
+  scheduling target, and mpv sets it to **0**
+  in display-synced rendering. It is NOT a
+  movie PTS. The implementation intentionally
+  takes `vo_frame.current->pts`, i.e.
+  `mp_image.pts`, expressed as source movie
+  seconds; negative sentinel `MP_NOPTS_VALUE`
+  or nonfinite values count as unknown.
+- The KMS callback's `msc` and `sec/usec`
+  UST represent the **confirmed physical
+  page flip**. UST is verified as
+  `CLOCK_MONOTONIC` on this i915 system;
+  it is NOT comparable directly with mpv
+  `mp_time_ns` and is not an audio clock.
+
+**Data flow implemented:**
+
+```text
+player/video.c -> vo_queue_frame() allocates vo_frame.frame_id
+  -> video/out/vo_gpu.c: draw_frame()
+     -> vo_drm_stereo_pair_set_frame_info(frame_id,
+          frame->current->pts, valid)
+  -> context_drm_egl.c: building[frame_id,pts]
+  -> atomically publish complete building -> pending/active
+  -> KMS RT worker: promote pending only at L,
+     copy active.frame_id/pts into in-flight drm->stereo_submit_*
+     ONLY after successful atomic/page-flip submission
+  -> drm_common.c: drm_pflip_cb() confirms FIRST L in generation,
+     records (generation, frame_id, movie_pts, physical_msc, physical_ust)
+  -> drm_egl_uninit(): pthread_join(RT worker), then print final
+     aggregates and bounded trace OUTSIDE realtime operation
+```
+
+The `Stereo unpresented pair discarded:` log
+now also includes `frame_id`,
+`movie_pts_s` and `pts_valid` of
+superseded pending pairs. With this information
+we can distinguish source movie pictures that
+did receive their first confirmed L from
+generations discarded before any KMS presentation.
+
+At all confirmed FIRST L events with valid PTS
+(approximately 24/s), the RT callback updates
+**fixed-size scalars only**:
+- `first_L_confirmed`, `valid_pts`,
+  `missing_pts`;
+- counts of 1, 2, 3, >=4 complete **L/R cycles**
+  between first L callbacks of consecutive
+  movie generations. At 23.976 fps / logical
+  ~59.999Hz, the typical intended pattern is
+  alternation between 2 and 3 cycles.
+- `frame_id_gaps` between generations shown,
+  which indicates skipped *queued VO IDs*
+  (not necessarily decoded source pictures);
+- `segments`, `discontinuities` if the
+  PTS jumps backwards by >100ms, advances by
+  >5s, or frame ID becomes nonmonotonic.
+- bounded relative timing statistics:
+  `relative_drift_ms = (confirmed_first_L_UST
+  - anchor_L_UST) - (media_pts - anchor_media_pts)`
+  with unit conversion to milliseconds.
+  The anchor is reset after a detected timeline
+  discontinuity.
+
+A fixed `DRM_STEREO_PTS_TRACE_CAP=256`
+ring stores snapshots of first 8 valid L
+presentations, every 120th valid source
+picture (~5s), and every new segment.
+Approximately 188 samples for a 15-minute
+23.976fps run will be printed as
+`Stereo PTS sample: frame_id=... generation=...
+movie_pts_s=... confirmed_L_msc=...
+confirmed_L_ust_us=... cycles_from_prev=...
+relative_drift_ms=...`.
+This is **NOT a full per-frame trace**; in
+between samples, exact aggregation continues
+for every confirmed first L with valid PTS.
+There are no extra per-frame MP_INFO messages
+on the 120Hz RT thread.
+
+After the RT thread has stopped, the log includes
+`Stereo PTS final:` with first L count,
+missing PTS, discontinuities, frame-ID gaps,
+display-cycle cadence (1/2/3/4plus), monotonic
+scanout span, media-PTS span, relative drift
+min/avg/max/last, total trace records and the
+`ust_monotonic` flag. It also retains the
+existing `Stereo DRM final:` aggregate.
+
+**Interpretation warning:** `relative_drift_ms`
+is a RELATIVE video-media-time versus
+physical-wall-time measurement; it is NOT
+absolute audio-to-photon latency or guaranteed
+audio/video synchronization. In particular
+`--video-sync=display-resample` may deliberately
+adjust the playback/audio rate to make 23.976
+fit the physical output, so a long-run slope
+can be expected. When interpreting 15-minute
+results correlate the observed media/display
+rates with mpv speed and audio status.
+
+Recommended 15-minute stability launch:
+```sh
+git pull --ff-only
+meson compile -C build
+./build/mpv --vo=gpu --gpu-context=drm \
+  --drm-connector=DP-1 --drm-mode=2560x1440@120 \
+  --drm-vrr-enabled=no --drm-stereo-3d=yes \
+  --drm-stereo-pacing-eye=right \
+  --drm-stereo-stats=no \
+  --video-sync=display-resample --swapchain-depth=3 \
+  --hwdec=auto --log-file=/tmp/mpv-stereo-pts-15m.log \
+  '/path/to/23.976fps-Half-SBS-movie.mkv'
+```
+
+Allow at least 15 minutes of normal playback
+and **quit normally** to get both final summaries
+and the bounded per-generation samples. Do not
+use `--display-fps-override=120`.
+Initial validation: confirmed `valid_pts` close
+to `first_eye_L`, nonzero `trace_samples_total`,
+samples contain plausible 0.0417s PTS increments,
+and exactly one first-L callback per accepted
+generation. **Do not attach shutters until
+physical L/R parity and missed-vblank counters
+are verified**. Compiling on the user's Arch
+system is still pending.
