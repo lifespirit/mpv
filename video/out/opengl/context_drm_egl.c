@@ -1482,6 +1482,48 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
                         (unsigned long long)drm->stereo_pts_trace_total,
                         drm->stereo_ust_monotonic);
 
+                // The requested vsync count belongs to the PREVIOUS
+                // pictured movie frame. Only intervals between consecutive
+                // frame IDs can be compared unambiguously. Missing pictures
+                // and seeks are explicitly excluded from the plan matrix.
+                MP_INFO(ctx, "Stereo plan final: "
+                        "planned_0=%llu planned_1=%llu planned_2=%llu "
+                        "planned_3=%llu planned_4plus=%llu "
+                        "nondisplay=%llu invalid_plan=%llu "
+                        "adjacent_compared=%llu exact=%llu mismatched=%llu "
+                        "skipped_intervals=%llu skipped_frame_ids=%llu "
+                        "invalid_msc=%llu signed_error_cycles=%lld "
+                        "abs_error_cycles=%llu "
+                        "(previous frame plan vs next confirmed first L)\n",
+                        (unsigned long long)drm->stereo_plan_requested_hist[0],
+                        (unsigned long long)drm->stereo_plan_requested_hist[1],
+                        (unsigned long long)drm->stereo_plan_requested_hist[2],
+                        (unsigned long long)drm->stereo_plan_requested_hist[3],
+                        (unsigned long long)drm->stereo_plan_requested_hist[4],
+                        (unsigned long long)drm->stereo_plan_nondisplay,
+                        (unsigned long long)drm->stereo_plan_invalid,
+                        (unsigned long long)drm->stereo_plan_comparisons,
+                        (unsigned long long)drm->stereo_plan_exact,
+                        (unsigned long long)(drm->stereo_plan_comparisons -
+                                             drm->stereo_plan_exact),
+                        (unsigned long long)drm->stereo_plan_skipped_intervals,
+                        (unsigned long long)drm->stereo_plan_skipped_ids,
+                        (unsigned long long)drm->stereo_plan_invalid_msc,
+                        (long long)drm->stereo_plan_signed_error_cycles,
+                        (unsigned long long)drm->stereo_plan_abs_error_cycles);
+                for (int requested = 0; requested < 5; requested++) {
+                    MP_INFO(ctx, "Stereo plan row: requested=%s "
+                            "actual_0=%llu actual_1=%llu actual_2=%llu "
+                            "actual_3=%llu actual_4plus=%llu\n",
+                            requested == 4 ? "4plus" :
+                                (const char *[]){"0","1","2","3"}[requested],
+                            (unsigned long long)drm->stereo_plan_matrix[requested][0],
+                            (unsigned long long)drm->stereo_plan_matrix[requested][1],
+                            (unsigned long long)drm->stereo_plan_matrix[requested][2],
+                            (unsigned long long)drm->stereo_plan_matrix[requested][3],
+                            (unsigned long long)drm->stereo_plan_matrix[requested][4]);
+                }
+
                 // Bounded 256-entry scalar trace: read after RT thread
                 // exit, so no synchronization or memory allocation occurs
                 // in the page-flip callback.
@@ -1494,13 +1536,20 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
                     MP_INFO(ctx, "Stereo PTS sample: frame_id=%llu "
                             "generation=%llu movie_pts_s=%.6f "
                             "confirmed_L_msc=%u confirmed_L_ust_us=%llu "
-                            "cycles_from_prev=%u relative_drift_ms=%.3f\n",
+                            "cycles_from_prev=%u relative_drift_ms=%.3f "
+                            "mpv_planned_vsyncs=%d display_synced=%d "
+                            "previous_planned_vsyncs=%d skipped_frame_ids=%llu "
+                            "plan_comparable=%d\n",
                             (unsigned long long)sample->frame_id,
                             (unsigned long long)sample->generation,
                             sample->media_pts, sample->msc,
                             (unsigned long long)sample->ust_us,
                             sample->cycles_since_previous,
-                            sample->relative_drift_ms);
+                            sample->relative_drift_ms,
+                            sample->planned_vsyncs, sample->display_synced,
+                            sample->previous_planned_vsyncs,
+                            (unsigned long long)sample->frame_id_gap,
+                            sample->plan_comparable);
                 }
             }
         }
