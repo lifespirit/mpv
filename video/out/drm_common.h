@@ -112,6 +112,9 @@ struct drm_opts {
     // Half-SBS active-shutter experiment: mpv sees one logical refresh
     // per completed L/R cycle while DRM keeps the physical mode unchanged.
     bool stereo_3d;
+    // Which physical eye callback drives the logical 60Hz mpv clock.
+    // 0 = L (normal), 1 = R (experimental half-cycle phase shift).
+    int stereo_pacing_eye;
 };
 
 // Shared option group, also queried by vo_gpu's DRM stereo startup.
@@ -160,6 +163,8 @@ struct vo_drm_state {
     bool stereo_have_flip;
     uint32_t stereo_last_msc;
     uint64_t stereo_last_ust_us;
+    // Physical L callback timestamp retained for R-phase logical feedback.
+    uint64_t stereo_last_left_ust_us;
     uint64_t stereo_window_first_ust_us;
     uint64_t stereo_last_report_ust_us;
     uint64_t stereo_last_report_missed, stereo_last_report_parity;
