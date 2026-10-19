@@ -1019,10 +1019,16 @@ static void *stereo_kms_thread(void *arg)
                     MP_ERR(ctx, "Stereo DRM event processing failed\n");
                     s->stop = true;
                 } else if (!drm->waiting_for_flip) {
-                    // Callback confirmed a physical page flip. Inform the
-                    // mpv VO pacing loop without making scanout wait on it.
-                    s->confirmed_flips = drm->stereo_flips;
-                    pthread_cond_broadcast(&s->flip_ready);
+                    // With --drm-stereo-3d, one complete L/R cycle is
+                    // one *logical* 60Hz mpv refresh. Wake the player only
+                    // on a confirmed L scanout, never on an R flip. The
+                    // independent KMS worker still processes ALL 120Hz
+                    // physical events and is never paced by the VO.
+                    if (!drm->opts || !drm->opts->stereo_3d ||
+                        drm->stereo_flip_eye == 0) {
+                        s->confirmed_flips = drm->stereo_flips;
+                        pthread_cond_broadcast(&s->flip_ready);
+                    }
                 }
             } else if (n < 0 && errno != EINTR) {
                 MP_ERR(ctx, "Stereo DRM poll failed: %s\n",
@@ -1501,16 +1507,21 @@ static bool drm_egl_init(struct ra_ctx *ctx)
 
     struct priv *p = ctx->priv = talloc_zero(ctx, struct priv);
     struct vo_drm_state *drm = ctx->vo->drm;
+    // Native option is the production-facing entry point. The older
+    // experiment variables remain supported for regression comparisons;
+    // they retain their original physical-120Hz VO pacing.
+    bool native_3d = drm->opts && drm->opts->stereo_3d;
     const char *sbs = getenv("MPV_DRM_STEREO_SBS");
     const char *pair = getenv("MPV_DRM_STEREO_PAIR");
-    p->stereo.enabled = sbs && pair &&
-        strcmp(sbs, "1") == 0 && strcmp(pair, "1") == 0;
+    p->stereo.enabled = native_3d ||
+        (sbs && pair && strcmp(sbs, "1") == 0 &&
+         strcmp(pair, "1") == 0);
     const char *seq = getenv("MPV_DRM_STEREO_SEQ");
     p->stereo.sequence_mode = p->stereo.enabled && seq &&
                               strcmp(seq, "1") == 0;
     const char *rt = getenv("MPV_DRM_STEREO_RT");
-    p->stereo.rt_mode = p->stereo.enabled && rt &&
-                        strcmp(rt, "1") == 0;
+    p->stereo.rt_mode = p->stereo.enabled &&
+                        (native_3d || (rt && strcmp(rt, "1") == 0));
     const char *gpu_wait = getenv("MPV_DRM_STEREO_GPU_WAIT");
     p->stereo.gpu_wait = p->stereo.enabled && gpu_wait &&
                          strcmp(gpu_wait, "1") == 0;
@@ -1518,8 +1529,11 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     p->stereo.freeze_pair = p->stereo.enabled && freeze_pair &&
                              strcmp(freeze_pair, "1") == 0;
     const char *native_fence = getenv("MPV_DRM_STEREO_NATIVE_FENCE");
-    p->stereo.native_fence = p->stereo.enabled && native_fence &&
-                             strcmp(native_fence, "1") == 0;
+    // The stable new mode requires genuine GPU-completion fences and a
+    // realtime KMS worker by default. Unsupported EGL extensions cause
+    // initialization to fail rather than silently returning to unsafe flips.
+    p->stereo.native_fence = p->stereo.enabled &&
+        (native_3d || (native_fence && strcmp(native_fence, "1") == 0));
     drm->stereo_pair_native_fence = p->stereo.native_fence;
     const char *min_age = getenv("MPV_DRM_STEREO_MIN_PAIR_AGE_MS");
     if (p->stereo.enabled && min_age && *min_age) {
