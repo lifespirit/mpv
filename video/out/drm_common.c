@@ -104,7 +104,7 @@ const struct m_sub_options drm_conf = {
         {"drm-draw-surface-size", OPT_SIZE_BOX(draw_surface_size)},
         {"drm-vrr-enabled", OPT_CHOICE(vrr_enabled,
             {"no", 0}, {"yes", 1}, {"auto", -1})},
-        {"drm-stereo-3d", OPT_FLAG(stereo_3d)},
+        {"drm-stereo-3d", OPT_BOOL(stereo_3d)},
         {0},
     },
     .defaults = &(const struct drm_opts) {
