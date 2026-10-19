@@ -1301,7 +1301,7 @@ int vo_drm_control(struct vo *vo, int *events, int request, void *arg)
             break;
         // --drm-stereo-3d changes mpv's *logical* presentation cadence,
         // never the hardware mode or the physical L/R KMS flip cadence.
-        if (drm->opts && drm->opts->stereo_3d)
+        if (drm->opts && drm->opts->stereo_3d && drm->stereo_pair_mode)
             fps /= 2.0;
         *(double*)arg = fps;
         return VO_TRUE;
