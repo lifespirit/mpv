@@ -3413,3 +3413,155 @@ Status: Source-only update, brace/anchor
 checked, target compilation still pending.
 Do not connect active USB shutters with
 any observed missed-vblank episodes.
+
+
+### Thirty-fourth run: quiet-RT logging regression test, 400s, zero physical misses
+
+Complete upload `mpv-stereo-pts-15m(1).log`,
+Oct 19 2026, **mpv `v0.41.0-dev-gaab50c009`**.
+Despite filename, the movie was manually stopped by
+`Run command: quit` at 399.862s; playback sampled
+**~399.6s (6m40s), not 15m**.
+Same Intel i915 TGL GT2/Mesa 26.2.4, physical
+DP1 2560x1440@120Hz, 23.976fps Half-SBS
+*Venom*, logical ~59.999Hz
+`--drm-stereo-3d=yes`,
+`--drm-stereo-pacing-eye=right`,
+`--drm-stereo-stats=no`,
+`--video-sync=display-resample`.
+Native GPU fences and SCHED_FIFO 10 enabled.
+
+This is the first run after source change
+`e43ac5c8`, which prevents synchronous
+producer-side `Stereo unpresented pair discarded`
+logging while holding the shared mutex
+when stats=no. **No periodic DRM SBS test and
+no individual discard INFO messages** were emitted.
+
+```text
+Stereo DRM final:
+ flips=47949 missed_vblanks=0 parity_errors=0
+ wrong_eye=0 wrong_hold=0
+ pair_renders=9587 pair_gen=9587
+ pair_unpresented_discards=267
+ first_eye_L=9320 first_eye_R=9319
+ first_eye_L_misses=0 first_eye_R_misses=0
+ fence_checks=15744 fence_promotions=9319
+ fence_deferrals=6424 fence_errors=0
+ pair_update_skips=0 commit_errors=0
+
+Stereo PTS final:
+ first_L_confirmed=9320 valid_pts=9320 missing_pts=0
+ segments=1 discontinuities=0 frame_id_gaps=267
+ cycles_1=835 cycles_2=3705 cycles_3=3611
+ cycles_4plus=1168
+ scanout_span_s=399.577599 movie_pts_span_s=399.816000
+ relative_drift_last_ms=-238.401
+ relative_drift_avg_ms=-43.951
+ relative_drift_min_ms=-254.432
+ relative_drift_max_ms=157.697
+ trace_samples_total=85 ust_monotonic=1
+```
+
+The crucial result: **zero missed physical
+vblanks, wrong-eye flips or parity errors over
+47,949 confirmed flips**, versus the old
+15m33s run's **6** gaps / wrong eyes. In the
+old run *all six* gap warnings were 17–20ms
+after verbose producer-side discard logging.
+The new quiet condition appears effective for
+the first 400 seconds and **supports**, but does
+not conclusively prove, RT mutex contention
+caused the previous KMS misses: trial durations
+differ. The teardown-only
+`Failed to commit atomic request: Error 22`
+still occurs after user quit, not in-play.
+
+**Video frame loss remains significant:**
+`267 / 9587 = 2.785%` of prepared pairs
+were superseded before a confirmed first-L;
+exactly **267 frame_id_gaps** confirm those
+movie pictures never reached scanout.
+All 9320 first-L records had valid media PTS.
+A one-count `first_eye_L` vs `first_eye_R`
+difference at shutdown is consistent with
+termination after an L but before its matching
+R, not proof of a playback eye mismatch.
+
+Important matched-content comparison:
+the prior **full** 933s run's final 6.22%
+cannot fairly be compared directly to this
+400s run's 2.79% because movie complexity
+varies. Using the first ~395 seconds of each
+run and the identical sampled VO frame IDs,
+the old trace had approximately **322**
+cumulative unseen frames by movie PTS=395s,
+versus **254** for the new trace.
+Sampled metrics at each 120th successful first L
+are precise, but counts interpolated at time
+boundaries are **estimates**, not final counters.
+Thus the improvement on matched early content
+is real but more modest than headline 6.22%
+versus 2.79% would suggest.
+
+Strong scene-time dependence:
+- First ~5min: approximately **1.43%** old
+  versus **1.23%** new cumulative drop rates.
+- Movie PTS=300–360s: interval drop fraction
+  approximately **9.58%** old versus
+  **6.98%** new.
+- 360–395s: approximately **9.69%** old
+  versus **7.80%** new.
+This spike is near the movie's chapter boundary
+at PTS 295.128s, but chapter boundaries alone
+do **not** prove a causal change in GPU load.
+A 15-min follow-up would be required to confirm
+physical KMS stability in the same high-loss
+middle and late source sections.
+
+First-L movie pacing remains variable:
+835 one-cycle intervals (**8.96%**),
+3705 two-cycle (**39.76%**),
+3611 three-cycle (**38.75%**),
+1168 four-plus (**12.53%**);
+only **78.51%** are 2–3 complete L/R cycles.
+No extra permanent queue was added.
+
+The bounded first-L PTS/UST samples show a
+**relative drift slope** of approximately
+**-0.942ms per movie-second** when excluding
+first 20sec startup, with ~**8.2ms**
+standard deviation about its trend (74
+samples). The nominal
+`23.976 -> 59.998795Hz / 2.5`
+display-resample speed adjustment predicts
+~**-0.979ms/s**. Thus the sampled relative
+timeline remains consistent with mpv's
+intended speed matching; the final -238ms is
+**not** an absolute audio/video offset.
+
+Engineering note: checking the actual
+`vo_is_ready_for_frame` implementation in
+`video/out/vo.c` confirms that
+`--video-timing-offset` only affects the
+`next_pts>=0` timed path. During the active
+`display-resample` mode,
+`player/video.c` passes `-1`, meaning
+this ordinary option cannot tune rendering
+lead time in our selected mode.
+Focus subsequent experiments on **explicit,
+bounded scheduling ahead/phase** and GBM
+buffer readiness with confirmed frame PTS,
+while strictly avoiding unbounded buffering,
+corruption of eye phase or frame-PTS accumulation.
+
+**Recommendation:** keep the new quiet mode
+(`--drm-stereo-stats=no`) and right pacing
+for short staging studies, but do not yet
+attach shutter glasses; the test ended too
+early for a 15-minute safety proof, and
+**2.8% omitted film frames** is still too
+high for smooth movie playback. Next design
+should target on-time readiness at allowed L
+boundaries rather than simply FIFO-preserving
+every source frame.
