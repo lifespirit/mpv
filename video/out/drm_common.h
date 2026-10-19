@@ -142,6 +142,15 @@ struct drm_stereo_pts_sample {
     double media_pts;
     double relative_drift_ms; // versus first confirmed L in this PTS segment
     uint32_t cycles_since_previous; // physical MSC delta / 2, 0 for anchor
+    // mpv's ORIGINAL schedule: num_vsyncs from first VO draw, before repeats
+    // decrement it. Applies to this frame's intended duration.
+    int planned_vsyncs;
+    bool display_synced;
+    // Interval ending at this frame: compare prior movie frame's plan only
+    // when previous and current confirmed frame IDs are consecutive.
+    int previous_planned_vsyncs; // -1 for uncomparable interval
+    uint64_t frame_id_gap;       // count skipped IDs since previous first L
+    bool plan_comparable;
 };
 
 struct vo_drm_state {
@@ -292,6 +301,8 @@ struct vo_drm_state {
     uint64_t stereo_submit_frame_id;
     double stereo_submit_media_pts;
     bool stereo_submit_pts_valid;
+    int stereo_submit_planned_vsyncs;
+    bool stereo_submit_display_synced;
     // First LEFT presentation telemetry (no per-frame KMS logging).
     uint64_t stereo_pts_first_L, stereo_pts_valid_L, stereo_pts_missing_L;
     uint64_t stereo_pts_segments, stereo_pts_discontinuities;
@@ -305,6 +316,21 @@ struct vo_drm_state {
     double stereo_pts_first_media_pts;
     double stereo_pts_last_media_pts;
     uint64_t stereo_pts_last_frame_id;
+    int stereo_pts_last_planned_vsyncs;
+    bool stereo_pts_last_display_synced;
+
+    // Planned logical refreshes from mpv vs actual first-L-to-first-L
+    // physical MSC deltas / 2. Compare only adjacent confirmed frame IDs:
+    // intervals spanning dropped movie frames are not single-frame holds.
+    uint64_t stereo_plan_requested_hist[5]; // 0, 1, 2, 3, >=4
+    uint64_t stereo_plan_nondisplay, stereo_plan_invalid;
+    uint64_t stereo_plan_comparisons, stereo_plan_exact;
+    uint64_t stereo_plan_skipped_intervals, stereo_plan_skipped_ids;
+    uint64_t stereo_plan_invalid_msc;
+    uint64_t stereo_plan_matrix[5][5]; // [planned 0/1/2/3/4+][actual]
+    int64_t stereo_plan_signed_error_cycles;
+    uint64_t stereo_plan_abs_error_cycles;
+
     double stereo_pts_last_drift_ms, stereo_pts_drift_min_ms;
     double stereo_pts_drift_max_ms, stereo_pts_drift_sum_ms;
     struct drm_stereo_pts_sample stereo_pts_trace[DRM_STEREO_PTS_TRACE_CAP];
@@ -348,7 +374,8 @@ bool vo_drm_stereo_pair_begin_eye(struct ra_ctx *ctx, int eye);
 bool vo_drm_stereo_pair_can_capture(struct ra_ctx *ctx);
 void vo_drm_stereo_pair_set_frame_info(struct ra_ctx *ctx,
                                        uint64_t frame_id, double media_pts,
-                                       bool pts_valid);
+                                       bool pts_valid, int planned_vsyncs,
+                                       bool display_synced);
 // Pace the mpv display-synced VO independently of the KMS scanout worker.
 void vo_drm_stereo_pair_wait_vsync(struct ra_ctx *ctx);
 
