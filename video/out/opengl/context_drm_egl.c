@@ -1386,6 +1386,69 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
                     (unsigned long long)drm->stereo_pair_fence_errors,
                     (unsigned long long)drm->stereo_pair_update_skips,
                     (unsigned long long)drm->stereo_commit_errors);
+
+            if (drm->stereo_pair_mode) {
+                // Observations are recorded only on DRM's confirmed first
+                // L flip, never on producer publication or atomic submit.
+                // Relative drift is between different clock timelines, and
+                // is NOT the absolute A/V offset. With display-resample the
+                // movie rate can intentionally differ from the wall clock.
+                double scanout_span_s = drm->stereo_pts_valid_L > 1
+                    ? (drm->stereo_pts_last_ust_us -
+                       drm->stereo_pts_first_ust_us) / 1000000.0 : 0.0;
+                double movie_span_s = drm->stereo_pts_valid_L > 1
+                    ? drm->stereo_pts_last_media_pts -
+                      drm->stereo_pts_first_media_pts : 0.0;
+                double avg_drift_ms = drm->stereo_pts_valid_L
+                    ? drm->stereo_pts_drift_sum_ms /
+                      drm->stereo_pts_valid_L : 0.0;
+                MP_INFO(ctx, "Stereo PTS final: "
+                        "first_L_confirmed=%llu valid_pts=%llu missing_pts=%llu "
+                        "segments=%llu discontinuities=%llu frame_id_gaps=%llu "
+                        "cycles_1=%llu cycles_2=%llu cycles_3=%llu cycles_4plus=%llu "
+                        "scanout_span_s=%.6f movie_pts_span_s=%.6f "
+                        "relative_drift_last_ms=%.3f relative_drift_avg_ms=%.3f "
+                        "relative_drift_min_ms=%.3f relative_drift_max_ms=%.3f "
+                        "trace_samples_total=%llu ust_monotonic=%d "
+                        "(relative to segment anchor, NOT audio-to-photon)\n",
+                        (unsigned long long)drm->stereo_pts_first_L,
+                        (unsigned long long)drm->stereo_pts_valid_L,
+                        (unsigned long long)drm->stereo_pts_missing_L,
+                        (unsigned long long)drm->stereo_pts_segments,
+                        (unsigned long long)drm->stereo_pts_discontinuities,
+                        (unsigned long long)drm->stereo_pts_id_gaps,
+                        (unsigned long long)drm->stereo_pts_cycles_1,
+                        (unsigned long long)drm->stereo_pts_cycles_2,
+                        (unsigned long long)drm->stereo_pts_cycles_3,
+                        (unsigned long long)drm->stereo_pts_cycles_4plus,
+                        scanout_span_s, movie_span_s,
+                        drm->stereo_pts_last_drift_ms, avg_drift_ms,
+                        drm->stereo_pts_drift_min_ms,
+                        drm->stereo_pts_drift_max_ms,
+                        (unsigned long long)drm->stereo_pts_trace_total,
+                        drm->stereo_ust_monotonic);
+
+                // Bounded 256-entry scalar trace: read after RT thread
+                // exit, so no synchronization or memory allocation occurs
+                // in the page-flip callback.
+                uint64_t n = MPMIN(drm->stereo_pts_trace_total,
+                                   DRM_STEREO_PTS_TRACE_CAP);
+                uint64_t first = drm->stereo_pts_trace_total - n;
+                for (uint64_t i = first; i < drm->stereo_pts_trace_total; i++) {
+                    const struct drm_stereo_pts_sample *sample =
+                        &drm->stereo_pts_trace[i % DRM_STEREO_PTS_TRACE_CAP];
+                    MP_INFO(ctx, "Stereo PTS sample: frame_id=%llu "
+                            "generation=%llu movie_pts_s=%.6f "
+                            "confirmed_L_msc=%u confirmed_L_ust_us=%llu "
+                            "cycles_from_prev=%u relative_drift_ms=%.3f\n",
+                            (unsigned long long)sample->frame_id,
+                            (unsigned long long)sample->generation,
+                            sample->media_pts, sample->msc,
+                            (unsigned long long)sample->ust_us,
+                            sample->cycles_since_previous,
+                            sample->relative_drift_ms);
+                }
+            }
         }
     }
 
