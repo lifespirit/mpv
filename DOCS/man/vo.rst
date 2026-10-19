@@ -712,10 +712,13 @@ Available video output drivers are:
         physical page flips in experimental DRM stereo mode. (default: yes)
 
         ``no`` skips formatting and logging this periodic diagnostic
-        inside the real-time KMS page-flip callback, while preserving the
-        underlying counters and error/warning messages. Useful for an A/B
-        test of instrumentation overhead without changing L/R scanout or
-        the 60 Hz logical scheduler.
+        inside the real-time KMS page-flip callback and suppresses verbose
+        individual ``Stereo unpresented pair discarded`` records that
+        otherwise run while holding the stereo-pair mutex. The cumulative
+        discard count and PTS/frame-ID gap statistics are still printed at
+        teardown after the KMS thread is stopped. KMS gap warnings remain
+        enabled. Useful for an A/B test of instrumentation overhead without
+        changing L/R scanout or the 60 Hz logical scheduler.
 
         Note that ``--msg-level=vo/gpu/drm=warn`` alone is not an
         equivalent test when ``--log-file`` is set: mpv may still
