@@ -675,6 +675,21 @@ Available video output drivers are:
 
         (default: display resolution)
 
+    ``--drm-stereo-3d=<yes|no>``
+        Experimental Half-SBS frame-sequential stereo mode for
+        ``--vo=gpu --gpu-context=drm`` at a physical 120 Hz refresh rate.
+        With ``yes``, mpv sees one logical refresh per complete L/R cycle
+        (approximately 60 Hz) for display-sync frame scheduling; the monitor
+        continues running at 120 Hz with independent alternating L/R scans.
+        Video frames may only change on the left-eye boundary.
+
+        This mode enables native EGL GPU fences and a real-time KMS worker.
+        It requires support for ``EGL_KHR_fence_sync`` and
+        ``EGL_ANDROID_native_fence_sync``. It does not currently control
+        USB shutter glasses, handle other 3D layouts, or measure optical A/V
+        latency. Do not override the display FPS to the physical 120 Hz
+        when using this mode. (default: no)
+
     ``--drm-vrr-enabled=<no|yes|auto>``
         Toggle use of Variable Refresh Rate (VRR), aka Freesync or Adaptive Sync
         on compatible systems. VRR allows for the display to be refreshed at any
