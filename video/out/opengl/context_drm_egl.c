@@ -1511,12 +1511,13 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
                         (unsigned long long)drm->stereo_plan_invalid_msc,
                         (long long)drm->stereo_plan_signed_error_cycles,
                         (unsigned long long)drm->stereo_plan_abs_error_cycles);
+                static const char *const plan_labels[5] =
+                    {"0", "1", "2", "3", "4plus"};
                 for (int requested = 0; requested < 5; requested++) {
                     MP_INFO(ctx, "Stereo plan row: requested=%s "
                             "actual_0=%llu actual_1=%llu actual_2=%llu "
                             "actual_3=%llu actual_4plus=%llu\n",
-                            requested == 4 ? "4plus" :
-                                (const char *[]){"0","1","2","3"}[requested],
+                            plan_labels[requested],
                             (unsigned long long)drm->stereo_plan_matrix[requested][0],
                             (unsigned long long)drm->stereo_plan_matrix[requested][1],
                             (unsigned long long)drm->stereo_plan_matrix[requested][2],
