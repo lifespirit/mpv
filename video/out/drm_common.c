@@ -1137,28 +1137,30 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                 uint32_t cycles = 0;
                 bool reset = !drm->stereo_pts_valid_L;
                 if (!reset) {
-                    uint32_t delta_msc = msc - drm->stereo_pts_last_msc;
-                    if (delta_msc > 0 && delta_msc < 1000 &&
-                        (delta_msc & 1u) == 0)
-                        cycles = delta_msc / 2u;
-                    if (cycles == 1)
-                        drm->stereo_pts_cycles_1++;
-                    else if (cycles == 2)
-                        drm->stereo_pts_cycles_2++;
-                    else if (cycles == 3)
-                        drm->stereo_pts_cycles_3++;
-                    else if (cycles >= 4)
-                        drm->stereo_pts_cycles_4plus++;
-
-                    if (id > drm->stereo_pts_last_frame_id + 1)
-                        drm->stereo_pts_id_gaps +=
-                            id - drm->stereo_pts_last_frame_id - 1;
                     // Seek/reconfig or source PTS discontinuity: start a
                     // new relative anchor, never accumulate stale drift.
                     if (id <= drm->stereo_pts_last_frame_id ||
                         pts < drm->stereo_pts_last_media_pts - 0.100 ||
-                        pts > drm->stereo_pts_last_media_pts + 5.0)
+                        pts > drm->stereo_pts_last_media_pts + 5.0) {
                         reset = true;
+                    } else {
+                        uint32_t delta_msc = msc - drm->stereo_pts_last_msc;
+                        if (delta_msc > 0 && delta_msc < 1000 &&
+                            (delta_msc & 1u) == 0)
+                            cycles = delta_msc / 2u;
+                        if (cycles == 1)
+                            drm->stereo_pts_cycles_1++;
+                        else if (cycles == 2)
+                            drm->stereo_pts_cycles_2++;
+                        else if (cycles == 3)
+                            drm->stereo_pts_cycles_3++;
+                        else if (cycles >= 4)
+                            drm->stereo_pts_cycles_4plus++;
+
+                        if (id > drm->stereo_pts_last_frame_id + 1)
+                            drm->stereo_pts_id_gaps +=
+                                id - drm->stereo_pts_last_frame_id - 1;
+                    }
                 }
                 if (reset) {
                     if (drm->stereo_pts_valid_L)
