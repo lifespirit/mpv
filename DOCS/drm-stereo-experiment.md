@@ -2577,3 +2577,109 @@ content/GPU load. Further planned work: associate
 `vo_frame.frame_id` / PTS with physical
 `stereo_pair.generation` and report actual accepted
 versus superseded video frames to the player.
+
+
+### Twenty-seventh run: public 3D CLI + 60Hz logical VO increases staging drops
+
+User log: `mpv-stereo-60hz.log` on Oct 19, 2026
+(mpv `v0.41.0-dev-g49e649fcb`, i915 Mesa TGL GT2).
+`--drm-stereo-3d=yes --video-sync=display-resample`
+with 2560x1440 physical 120Hz mode and VRR off,
+swapchain depth 3, VAAPI decoding of 23.976fps
+Half-SBS film. This confirms successful compilation,
+option registration, and runtime operation of the
+new half-frequency VO scheduler.
+
+Startup:
+`DRM stereo 3D: physical 119.998 Hz L/R, logical
+59.999 Hz L-only player pacing and presentation
+feedback (native GPU fences on)`;
+`Assuming 59.998795 FPS for display sync.`;
+`Video sync mode enabled.`. At end the player
+received an explicit quit command; video played
+~115.98s, not an unbounded stress run.
+
+All **115 complete** 120-physical-flip windows
+(13,800 scanouts in 115s) had zero physical
+`missed_vblanks`, `wrong_eye`,
+`parity_errors`, `first_eye_L_misses`,
+`first_eye_R_misses`, `commit_errors`,
+`pair_update_skips`, or `fence_errors`,
+`max_gap=1`, `shown_hz=119.997`.
+The new logical 60Hz signaling did NOT disrupt the
+independent 120Hz KMS L/R alternation.
+
+**But logical VO pacing dramatically worsened
+movie-frame generation retention:** at last complete
+report `pair_renders=2758`,
+`pair_gen=2757`,
+`first_eye_L=2716 first_eye_R=2716`,
+`pair_unpresented_discards=41` (**1.49%** of
+prepared stereo generations), vs the previous
+517s/5 drop baseline (**0.040%**) and earlier
+939s/17 drop run (**0.075%**). These runs have
+different duration and are not precise matched
+workload benchmarks; nevertheless the increased
+loss is substantial. The code currently does
+not propagate staging losses to mpv's main
+`Dropped` video-frame count.
+
+Forty event-level discarded generations were
+logged, each `reason=newer_generation` and
+`left_boundary_fence_deferrals=2`, both fences
+signaled **at discard**. Their median publication
+ages: first failed eligible L **6.858ms**, last
+failed L **23.517ms**, intermediate R check
+**31.885ms**, overwritten **33.504ms**.
+At the intermediate R checkpoint, **18/40** had
+both GPU fences signaled and **22/40** still had
+an *unsignaled right fence*. No `gbm_pressure`
+discards. Cumulative ages of successfully first
+submitted pairs: L avg **23.726ms**, R avg
+**32.065ms**; all have an approximately one
+physical-vblank L-to-R difference.
+
+This contrasts with previous 120Hz-VO callback
+scheduling when failed-pair last-L checks
+clustered around **31.9ms**, intermediate R
+around **40ms**, overwrite around **41.7ms**.
+The almost **8.3ms** phase change is a strong
+hint that 60Hz VO pacing is placing new pair
+publications disadvantageously with respect to
+eligible L boundaries. The correct 60Hz
+*frequency* does not determine the correct
+*phase*. No mpv DS:2/3 status is present in
+the captured file; do not pretend per-frame
+display cadence is explicitly verified.
+
+**Follow-up experiment (opt-in, following the log):**
+Added `--drm-stereo-pacing-eye=<left|right>` with
+default left preserving this tested behavior.
+`right` moves only mpv's logical wakeup signal
+from confirmed L scanouts to confirmed R scanouts
+(~8.33ms later). Hardware KMS still commits
+L/R at 120Hz and promotes new movie pairs only
+on L. The `present_sync` UST in R-pacing mode
+is sourced from the most recent confirmed L
+event, with a logical MSC advancing by one per
+full L/R cycle, to avoid reporting the R callback
+as the film-frame presentation timestamp.
+
+Test on the user's machine with the **same**
+`--drm-stereo-3d=yes` options, and add
+`--drm-stereo-pacing-eye=right`. First validate
+startup, absence of KMS misses and roughly normal
+A/V speed; then compare `pair_unpresented_discards`
+and L/R first-age statistics over matched 2-minute
+segments (ideally same movie scenes). If it
+does not substantially improve pair losses
+without A/V/DRM regressions, revert to
+`--drm-stereo-pacing-eye=left` and examine
+explicit PTS/VO frame_id-to-GBM generation mapping,
+rather than piling up a FIFO.
+
+**Limitation:** R-pacing has only been source
+reviewed, not compiled or tested on the user's
+hardware. It is a controlled scheduling-phase
+experiment, *not* a finalized fix or proof of
+audio-to-photon correctness.
