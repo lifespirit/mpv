@@ -2797,3 +2797,96 @@ sequence, not as an in-play stereo atomic-commit
 error (the in-play counter remains zero). Treat
 this as a separate teardown issue until
 independently reproduced.
+
+
+### Twenty-ninth run: right logical pacing, 60s, no KMS gaps; msg-level does NOT suppress logfile INFO
+
+User control log `mpv-stereo-right-nostats.log`,
+built from `v0.41.0-dev-g58c06c0a1` on i915
+Tiger Lake + Mesa 26.2.4, Oct 19 2026. Launch
+used `--drm-stereo-3d=yes`,
+`--drm-stereo-pacing-eye=right`,
+`--msg-level=vo/gpu/drm=warn`,
+`--log-file=/tmp/mpv-stereo-right-nostats.log`,
+physical 2560x1440@120, VAAPI decode of the
+same 23.976fps Half-SBS movie.
+Playback stopped with an explicit quit around
+61.106s, after **60** complete 120-flip
+report windows (**7,200 confirmed physical
+KMS flips**, 60s sampled).
+
+Results at last complete window:
+`shown_hz=119.997 window_hz=119.997`,
+`missed_vblanks=0 parity_errors=0
+wrong_eye=0 wrong_hold=0 max_gap=1
+first_eye_L_misses=0 first_eye_R_misses=0
+pair_update_skips=0 commit_errors=0
+fence_errors=0`. Worst per-report
+`max_commit_callback_ms=9.058`ms.
+`pair_renders=1437`, `pair_gen=1437`,
+`first_eye_L=1433`, `first_eye_R=1433`,
+`pair_unpresented_discards=4`, **0.278%**;
+`fence_checks=2038 fence_promotions=1432
+fence_deferrals=605 fence_unready_L=20
+fence_unready_R=605`.
+First-submission age: L mean **22.121ms**, R
+mean **30.467ms**. There are exactly four
+`Stereo unpresented pair discarded:` event
+records (all newer-generation replacement).
+One occurred at 0.393s startup; the other three
+at ~13.34s, 42.257s and 42.339s. Both GPU
+fences signaled by the discard in all cases.
+The event-level `intermediate_R_probe` was
+absent on all four, which is expected if the
+twice-failed L was already followed by producer
+replacement before another R probe.
+
+**This run directly contradicts the notion that
+R pacing necessarily causes the earlier severe
+109 periodic KMS gaps or ~13% frame-generation
+discard rate.** It ran reliably for 60s. But it
+does NOT isolate the previous suspected cause:
+
+Despite the `--msg-level=vo/gpu/drm=warn` setting,
+the uploaded log still contains **all 60 verbose
+`[i][vo/gpu/drm] DRM SBS test:` lines**. Review
+of `common/msg.c` `update_loglevel()` and
+`write_msg_to_buffers()` shows that mpv's
+`--log-file` requests DEBUG-level messages
+even when terminal module level is WARN, and
+`MP_INFO` is still executed inside the KMS callback.
+Thus this run is a **successful right-phase repeat
+with status logging still active**, not proof that
+disabling INFO fixes the old periodic gaps. The
+prior 113s bad run and this 60s good run are
+non-identical trials with unexplained variability,
+and the single-second correlation between
+`DRM SBS test` and misses from the bad run
+is not enough to prove causation.
+
+After this run, a *real, explicit* opt-out has
+been added: `--drm-stereo-stats=no`
+(default yes, preserving all existing behavior).
+It guards only the expensive formatting and
+`MP_INFO` call for the per-120-flip report in
+`drm_pflip_cb`, still updating the telemetry
+counters and leaving `DRM SBS gap` warning
+messages visible. The first correct overhead
+isolation experiment should run R pacing with
+**`--drm-stereo-stats=no`**, `--log-file` kept
+enabled for error recording. Check that
+`DRM SBS test:` lines are genuinely absent;
+continue at least ~2min to cover the duration
+that previously showed systematic misses.
+To evaluate video staging drops, temporarily
+repeat with stats=yes at comparable scene/time
+windows since without periodic status logs we
+no longer get the final cumulative discard
+counter (individual first 40 drop event records
+are still available).
+
+This stats opt-out has only been source reviewed,
+not compiled or run on the target hardware.
+Log suffix still reports a shutdown-time DRM
+atomic EINVAL *after* playback termination;
+not an in-play atomic commit failure.
