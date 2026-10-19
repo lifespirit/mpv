@@ -3791,3 +3791,129 @@ promotion and nonblocking native fence
 readiness checks. Resource budget requires
 care before adding an older-pair queue;
 a queue must not accumulate video A/V lag.
+
+
+### Thirty-seventh run: same-build, same-seek LEFT vs RIGHT 120s A/B exposes frame-pacing tradeoff
+
+User upload `mpv-stereo-stress-left.log` compared against
+`mpv-stereo-stress.log` (right phase), Oct 19 2026.
+**Both exact commit `v0.41.0-dev-g21b39b5d9`**
+with the same `--start=295 --length=120`
+same source file, VRR off, physical DP1
+2560x1440@120, Intel i915/TGL GT2,
+`--video-sync=display-resample`,
+`--drm-stereo-3d=yes`, native GPU fences,
+SCHED_FIFO 10, `--drm-stereo-stats=no`,
+`--swapchain-depth=3`. The **only**
+intended mode difference is
+`--drm-stereo-pacing-eye=left|right`.
+
+| Reported final counter | LEFT | RIGHT |
+|---|---:|---:|
+| physical KMS flips | 14,400 | 14,399 |
+| missed_vblanks, wrong_eye, wrong_hold | **0, 0, 0** | **0, 0, 0** |
+| parity_errors, commit_errors, fence_errors | **0, 0, 0** | **0, 0, 0** |
+| pair_renders / pair_gen | 2,877 / 2,877 | 2,876 / 2,876 |
+| first_eye_L / first_eye_R | 2,813 / 2,813 | 2,848 / 2,848 |
+| pair_unpresented_discards | **64 (2.225%)** | **28 (0.974%)** |
+| frame_id_gaps | 64 | 29 |
+| fence_checks | 5,788 | 4,376 |
+| fence_promotions | 2,812 | 2,847 |
+| fence_deferrals | 2,975 | 1,528 |
+| gbm_pressure discards | 0 | 0 |
+| newer_generation discards | 64 | 28 |
+| drop deferrals_0/1/2/3plus | 0 / 1 / 63 / 0 | 0 / 0 / 28 / 0 |
+| discard age min / mean / max (ms) | 16.616 / 33.583 / 38.804 | 33.010 / 34.471 / 38.010 |
+| valid first L source PTS | 2,813 | 2,848 |
+| source PTS segments/discontinuities | 1 / 0 | 1 / 0 |
+| PTS relative last drift | +0.375ms | -16.425ms |
+
+**Critical tradeoff hidden by drop totals:**
+The actual completed L/R cycle intervals
+between confirmed FIRST L movie generations
+were:
+
+| physical full stereo cycles | LEFT count | RIGHT count |
+|---|---:|---:|
+| 1 cycle (~16.67ms) | **0** | **281 (9.87%)** |
+| 2 cycles (~33.33ms) | 1,367 | 1,142 |
+| 3 cycles (~50ms) | 1,380 | 1,092 |
+| 4 or more cycles (>=66.67ms) | **65** | **332 (11.66%)** |
+| 2+3-cycle fraction | **97.69%** | **78.47%** |
+
+Thus LEFT preserved the desired 23.976fps
+2/3-cycle cadence between shown frames MUCH
+better, with **no 1-cycle intervals at all**,
+despite omitting 64 entire source frames
+rather than RIGHT's 28. RIGHT is 2.28x
+better by the pending-drop count but exhibits
+frequent 1-cycle catch-up and >=4-cycle
+stalls, and may look visibly jerkier.
+
+Using the 31 recorded timestamp/PTS samples
+per run, fitting relative drift against source
+movie PTS for the 23 samples with
+`movie_pts_s>=300` gives:
+- LEFT slope **-0.9901ms/source-second**,
+  detrended residual SD **3.84ms**.
+- RIGHT slope **-0.9482ms/source-second**,
+  detrended residual SD **8.77ms**.
+Both slopes are close to the predicted
+~**-0.979ms/second** from display-resample
+speed matching and do not independently
+establish actual A/V latency; the lower
+LEFT sample residual corroborates its
+more regular frame timing.
+
+The LEFT final loss histogram
+`deferrals_1=1 deferrals_2=63`
+(and RIGHT `deferrals_2=28`) confirms that
+almost all missing generations had two
+failed eligible L fence checks before the
+newer film generation replaced pending.
+No GBM-pressure discards and no in-play
+commit/fence errors were seen.
+A nonzero `fence_deferrals` counts
+readiness checks, NOT source frames dropped.
+
+Both complete logs ended normally via
+`--length=120` and then showed the existing
+post-playback DRM atomic EINVAL during
+teardown. This is not counted as an
+in-play KMS failure and remains a separate
+cleanup issue.
+
+**Engineering inference:** Avoid declaring
+right pacing a clear winner from its
+0.974% drop fraction alone. There are
+two objectives: source-frame retention and
+near-ideal 2/3 movie-picture hold cadence.
+The correlated change in cadence vs wakeup
+phase suggests the mpv logical video scheduler
+and KMS picture-promotion timing are currently
+misaligned under right pacing. Do not attempt
+an unbounded FIFO to hide dropped generations:
+that can turn frame omission into accumulating
+audio/video delay.
+
+**Next experiment should distinguish player
+frame cadence requests from actual KMS cadence:**
+carry `vo_frame.num_vsyncs` (requested logical
+L/R cycles), `display_synced`, and the
+movie PTS with the same `stereo_pair` metadata
+already traced, then compare the planned
+per-picture 2/3 cycles with first-L-to-first-L
+MSC deltas. If the player requested 2/3 but
+KMS produced 1/4, focus on the VO staging and
+promotion/feedback phase rather than tweaking
+display-resample. Prefer bounded aggregate
+instrumentation and teardown snapshots, not
+per-refresh synchronous logs under the KMS
+mutex. Only then consider a selectable hybrid
+producer-wakeup/presentation-feedback phase
+experiment. Physical L/R parity must remain
+independent and no frame queue should be
+allowed to accumulate A/V lag.
+
+No runtime code modified in this documentation
+update; results are grounded in the user logs.
