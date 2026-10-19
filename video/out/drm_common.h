@@ -115,6 +115,9 @@ struct drm_opts {
     // Which physical eye callback drives the logical 60Hz mpv clock.
     // 0 = L (normal), 1 = R (experimental half-cycle phase shift).
     int stereo_pacing_eye;
+    // Enable 120-flip verbose timing reports from DRM callback.
+    // Set to false for proper RT logging overhead A/B tests.
+    bool stereo_stats;
 };
 
 // Shared option group, also queried by vo_gpu's DRM stereo startup.
