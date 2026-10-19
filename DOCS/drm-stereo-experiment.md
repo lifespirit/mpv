@@ -3616,3 +3616,178 @@ for isolating producer scheduling pressure in
 summary. Longer uninterrupted R-pacing testing
 is still required before shutter-controller
 development.
+
+
+### Thirty-sixth run: 120s targeted seek stress, all 28 drops after 2 failed L promotions
+
+User log `mpv-stereo-stress.log`, Oct 19, 2026;
+**built commit `v0.41.0-dev-g21b39b5d9`**.
+Full file 1,160 lines. `--start=295 --length=120`
+restarts the same 23.976fps Half-SBS *Venom*
+at chapter 2 (~04:55) and exits at EOF
+for this requested length, around wall
+120.4s. Other options unchanged:
+`--drm-stereo-3d=yes`,
+`--drm-stereo-pacing-eye=right`,
+`--drm-stereo-stats=no`,
+`--video-sync=display-resample`,
+`--swapchain-depth=3`, native GPU fences,
+Intel i915 at DP1 2560x1440@120 Hz,
+SCHED_FIFO priority 10. mpv reports
+logical 59.998795Hz display sync.
+
+```text
+Stereo DRM final:
+flips=14399 missed_vblanks=0 parity_errors=0
+wrong_eye=0 wrong_hold=0
+pair_renders=2876 pair_gen=2876
+pair_unpresented_discards=28
+first_eye_L=2848 first_eye_R=2848
+first_eye_L_misses=0 first_eye_R_misses=0
+fence_checks=4376 fence_promotions=2847
+fence_deferrals=1528 fence_errors=0
+pair_update_skips=0 commit_errors=0
+
+Stereo DRM drops final:
+newer_generation=28 gbm_pressure=0
+deferrals_0=0 deferrals_1=0
+deferrals_2=28 deferrals_3plus=0
+age_samples=28 age_min_ms=33.010
+age_avg_ms=34.471 age_max_ms=38.010
+
+Stereo PTS final:
+first_L_confirmed=2848 valid_pts=2848 missing_pts=0
+segments=1 discontinuities=0 frame_id_gaps=29
+cycles_1=281 cycles_2=1142 cycles_3=1092
+cycles_4plus=332
+scanout_span_s=119.936575
+movie_pts_span_s=119.953000
+relative_drift_last_ms=-16.425
+relative_drift_avg_ms=54.185
+relative_drift_min_ms=-16.764
+relative_drift_max_ms=133.340
+trace_samples_total=31 ust_monotonic=1
+```
+
+**Physical timing: 14,399 flips, 0 missed
+vblanks, 0 eye/parity errors, 0 fence or
+atomic commit errors.** An atomic
+`EINVAL` appears only *after* the normal
+end-of-file shutdown. The quiet mode
+produces no periodic or per-pair hot-path
+INFO records; final counters are printed
+after joining the KMS thread.
+
+**Unshown GBM picture generations:
+28/2876 = 0.9736%.** All 28 losses are
+`newer_generation`, none from
+`gbm_pressure`. All 28 had exactly
+**2** failed L-boundary GPU-ready
+promotion attempts before their next
+producer picture superseded `pending`.
+Producer publication-to-discard age
+33.01–38.01ms, mean 34.471ms. Therefore
+the single-slot pending replacement policy
+and the phase of readiness relative to
+physical L opportunities remain the
+concrete source of in-VO generation losses.
+The experiment does *not* give individual
+GPU-fence completion timestamps (the quiet
+mode suppresses polls at discard).
+
+**Nuance: 29 `frame_id_gaps` versus 28
+unpresented generations.** On the initial
+source-PTS records,
+`frame_id=37 gen=4 pts=295.128` is
+followed by `frame_id=39 gen=5
+pts=295.212`. Thus `frame_id=38`
+(~PTS 295.170) is absent from first-L
+output **without any skipped rendered
+generation** at that point (`gen`
+increases by one). This one gap was
+introduced upstream of the completed
+stereo-pair publishing path, probably by
+mpv's own VO/video scheduling on startup/
+seek; it is NOT a KMS pair discard.
+The other 28 frame-ID gaps match exactly
+the 28 unseen paired GBM generations.
+Do not use `frame_id_gaps` as an exact
+synonym for `pair_unpresented_discards`
+in all situations.
+
+Frame interval distribution over 2,847
+successive first-L transitions:
+- 1 full L/R cycle: 281 = 9.87%;
+- 2 cycles: 1142 = 40.11%;
+- 3 cycles: 1092 = 38.36%;
+- 4+ cycles: 332 = 11.66%.
+Only 78.47% have the normal 2/3-cycle
+cadence. The 21.5% of anomalous 1 or
+>=4-cycle intervals indicate persistent
+*frame pacing* irregularity, not just
+omitted frames.
+
+The 31 PTS samples show all 2,848 first L
+generations are assigned valid source
+PTS. The first few snapshots show startup
+timing discontinuity (e.g. first to second
+presentation 7 full cycles / 116.7ms).
+A line fit for samples at movie
+PTS >=300s yields approximate
+**-0.948ms of relative drift per movie
+second** and **8.58ms standard deviation
+after detrending**, consistent with the
+expected ~-0.979ms/s display-resample
+speed adjustment. The final relative
+drift -16.425ms is NOT absolute A/V error.
+
+**Comparison caveat / new hypothesis:**
+The full-file 400s run ending near movie
+PTS 400s recorded 267/9587 (2.79%)
+unseen stereo pairs, concentrated in the
+portion after PTS ~295s. The targeted
+**fresh-seek** run of the overlapping
+295–415s source section records only
+28/2876 (0.97%). These are *not*
+controlled, equal-boundary trials: starting
+at PTS 295 **resets** display-sync phase,
+GPU warm-up and VO history, whereas the
+continuous run reaches that material after
+five minutes of playback. Therefore it
+would be premature to conclude that
+particular movie action scenes are
+inherently too demanding for the GPU.
+The large improvement on the same source
+content suggests producer-vblank phase
+and/or warm-up state is material.
+The code change between runs was only
+quiet-mode scalar loss instrumentation;
+it did not alter eye selection or timing.
+
+Recommendations:
+1. Keep the proven RT-safe `stats=no`
+   baseline; avoid putting logging back
+   under `stereo.mutex`.
+2. Measure lead time of native GPU
+   fences relative to the *eligible next
+   physical L boundary* and the nominal
+   mpv output schedule. The objective
+   must be correct PTS and 2/3-cycle
+   cadence, not hiding all losses by
+   forcing FIFO delays.
+3. Run a controlled same-seek 295–415s
+   A/B with `--drm-stereo-pacing-eye=left`
+   vs `right` on the same build,
+   before treating the right phase as
+   universal.
+4. Consider experimental depth/pipeline
+   knobs only if their effects are
+   measurable without changing A/V
+   offset and 120Hz eye-parity integrity.
+
+The exact GBM KMS implementation remains
+a single `pending` slot, with L-only
+promotion and nonblocking native fence
+readiness checks. Resource budget requires
+care before adding an older-pair queue;
+a queue must not accumulate video A/V lag.
