@@ -475,9 +475,11 @@ static int preinit(struct vo *vo)
                 vo->drm->stereo_slot_mode ? "on" : "off");
         if (native_3d)
             MP_INFO(vo, "DRM stereo 3D: physical %.3f Hz L/R, "
-                    "logical %.3f Hz L-only player pacing and "
-                    "presentation feedback (native GPU fences on)\n",
-                    hz, hz / 2.0);
+                    "logical %.3f Hz mpv pacing on %s callback "
+                    "(presentation timestamps remain tied to L; "
+                    "native GPU fences on)\n",
+                    hz, hz / 2.0,
+                    vo->drm->opts->stereo_pacing_eye ? "R" : "L");
 #else
         MP_ERR(vo, "MPV_DRM_STEREO_SBS=1 was built without DRM support\n");
         goto err_out;
