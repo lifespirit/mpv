@@ -2683,3 +2683,117 @@ reviewed, not compiled or tested on the user's
 hardware. It is a controlled scheduling-phase
 experiment, *not* a finalized fix or proof of
 audio-to-photon correctness.
+
+
+### Twenty-eighth run: R-pacing causes severe periodic 120Hz KMS gaps
+
+User log `mpv-stereo-60hz(1).log`, Oct 19, 2026,
+mpv `v0.41.0-dev-g58c06c0a1`,
+`--drm-stereo-3d=yes`,
+`--drm-stereo-pacing-eye=right`,
+`--video-sync=display-resample`,
+120Hz physical i915/TGL DP-1 and 23.976fps Half-SBS
+film. Runtime ~114s, explicitly quit. Output log
+contains 1,326 lines and **113 complete 120-flip
+DRM SBS reports** (13,560 physical page-flip callbacks
+at the last full report).
+
+**Severe R-phase regression:**
+- Last cumulative `missed_vblanks=108`,
+  `parity_errors=216`,
+  `wrong_eye=108`,
+  `wrong_hold=108`,
+  `max_gap=2` (window misses start after the fifth
+  window). There is **one additional gap warning
+  after** the final complete report, making
+  **109 logged `DRM SBS gap` warnings** overall.
+- Last `shown_hz=119.048`; trailing windows
+  `window_hz=119.005`, not the expected 119.997Hz.
+  Almost every one-second diagnostics window
+  contains precisely one missed physical vblank.
+- `pair_renders=2731`,
+  `pair_gen=2730`,
+  `first_eye_L=2369`,
+  `first_eye_R=2369`,
+  `pair_unpresented_discards=361` — **13.2%** of
+  2731 rendered pairs, vs 41/2758 (**1.49%**) in
+  the roughly equivalent 115s original L-paced
+  experiment. `first_eye_L_misses=37`,
+  `first_eye_R_misses=18`. Mean first L/R pair
+  ages 26.960 / 35.431 ms, respectively.
+- `fence_checks=4791`,
+  `fence_promotions=2368`,
+  `fence_deferrals=2422`,
+  `fence_unready_L=502`,
+  `fence_unready_R=2422`,
+  `fence_errors=0`,
+  `commit_errors=0`,
+  `pair_update_skips=0`.
+  Thus the regression occurs despite valid fence
+  polling and atomic commits.
+
+**An exceptionally strong periodicity clue:**
+All **109** gap warnings appear **immediately
+after** a `DRM SBS test:` report at every 120th
+completed flip, starting with the report at
+5.303s (flips=600), then 6.311s (flips=720), etc.
+First gap 5.319s, then 6.327s, 7.336s ...
+114.222s; consecutive gap warnings are separated
+by only **1.008–1.009 seconds** (mean 1.00836s),
+equivalent to 121 physical refreshes per
+120 confirmed flips. The first five report windows
+had no misses.
+
+Critically, at the fifth report the already
+measured `max_callback_lag_ms=6.331` and
+`max_commit_callback_ms=14.896` reveal a large
+callback timing outlier, and subsequent gap warnings
+show `submit_after_callback_ms` only 0.005–0.014ms
+while `submit_after_ust_ms` often reaches
+14–15ms. **Hypothesis, not proof:** expensive
+`MP_INFO` printing of the long per-second
+`DRM SBS test` status **inside the real-time
+KMS callback and while holding the pair mutex**
+is delaying the next atomic commit under the
+R-phase producer scheduling. The exact
+120-flip cadence is much too systematic to
+ascribe to random GPU workload. A first diagnosis
+should suppress only the INFO output of
+`vo/gpu/drm` and retain its WARN diagnostics:
+
+```sh
+# Repeat the same right-eye command, adding:
+--msg-level=vo/gpu/drm=warn
+--log-file=/tmp/mpv-stereo-60hz-right-nostats.log
+```
+
+This mpv option is officially supported
+(`DOCS/man/options.rst`, `--msg-level`), and
+the module name matches the log prefix. It
+suppresses per-second INFO lines but leaves
+`DRM SBS gap` warnings visible. A 20–30s test
+can determine whether the periodic KMS gaps
+are caused by synchronous logging: if the
+per-second warnings disappear, move telemetry
+outside the RT critical path; if they persist,
+investigate R-phase scheduling itself.
+
+**Do not deploy R-pacing** or synchronize shutter
+glasses with this build: every skipped physical
+vblank can invalidate eye phase. The proven
+baseline is `--drm-stereo-pacing-eye=left` /
+the original default. Regardless of the logging
+hypothesis, R-pacing also suffers an unacceptable
+~13% unpublished-pair loss rate and therefore
+is not presently a candidate for production.
+Investigate L-mode frame pacing and honest
+PTS/VO frame_id-to-KMS promotion feedback
+rather than simply pushing renders onto R.
+
+The trailing message
+`Failed to commit atomic request: Error number 22
+occurred` appears **after** the quit/shutdown
+sequence, not as an in-play stereo atomic-commit
+error (the in-play counter remains zero). Treat
+this as a separate teardown issue until
+independently reproduced.
