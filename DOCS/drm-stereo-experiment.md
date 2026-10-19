@@ -3565,3 +3565,54 @@ high for smooth movie playback. Next design
 should target on-time readiness at allowed L
 boundaries rather than simply FIFO-preserving
 every source frame.
+
+
+### Thirty-fifth diagnostic patch: aggregate loss reasons in quiet mode
+
+Following the 400s zero-KMS-gap run, add cheap
+producer-side counters for the next 5–7 minute
+high-motion-stress observation, **without
+reintroducing per-drop synchronous logging
+or fence polls while holding stereo.mutex**.
+
+The `Stereo DRM drops final:` line, printed
+after joining the realtime KMS thread, now
+reports:
+- `newer_generation` / `gbm_pressure`:
+  which cause discarded the one-slot
+  `pending` (these sum to the previous
+  unpresented count for currently known reasons);
+- `deferrals_0`, `deferrals_1`,
+  `deferrals_2`, `deferrals_3plus`:
+  how many eligible L promotions already
+  tried and failed GPU fence readiness
+  before that pending generation was
+  superseded (these sum to all discarded
+  generations);
+- `age_samples`, `age_min_ms`,
+  `age_avg_ms`, `age_max_ms`:
+  CPU publication-to-discard age for
+  valid, nonnegative pair age samples.
+
+This is scalar-only instrumentation; the
+hot producer path checks an existing integer,
+compares the known reason string, and reads a
+monotonic timestamp. **It does not poll GPU
+fences or print in the hot path**, and it
+does not change pair selection, output,
+queue depth or clock. Physical misses still
+require the separate `Stereo DRM final`
+confirmation. This code has not yet been
+compiled or tested on the target i915 machine.
+
+Suggested efficient stress test: same parameters,
+`--start=295 --length=120` to concentrate
+on the movie segment where both previous
+tests saw a large jump in omitted pictures.
+The seek/warm-up means it is *not* a perfectly
+matched full-run benchmark, but it is useful
+for isolating producer scheduling pressure in
+2 minutes. Stop normally to flush the final
+summary. Longer uninterrupted R-pacing testing
+is still required before shutter-controller
+development.
