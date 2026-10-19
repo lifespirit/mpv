@@ -3266,3 +3266,150 @@ generation. **Do not attach shutters until
 physical L/R parity and missed-vblank counters
 are verified**. Compiling on the user's Arch
 system is still pending.
+
+
+### Thirty-third run: 15m33s R pacing with PTS/confirmed-L frame attribution
+
+User-uploaded full `mpv-stereo-pts-15m.log`
+(203 KiB, 1,959 lines), Oct 19, 2026,
+mpv `v0.41.0-dev-g64c80a4b2` on Intel i915,
+Mesa TGL GT2, same Half-SBS 23.976fps film,
+2560x1440 physical 120Hz DP1, native GPU
+fences, `--video-sync=display-resample`,
+`--drm-stereo-3d=yes`,
+`--drm-stereo-pacing-eye=right`,
+`--drm-stereo-stats=no`. RT worker
+`SCHED_FIFO priority 10`. Explicit quit
+after ~933.6 seconds; stats emitted after
+stopping KMS worker and before DRM teardown.
+
+**Confirmed KMS final totals:**
+
+| Counter | Total |
+|---|---:|
+| physical KMS flips | **111,996** (~15m33s) |
+| missed physical vblanks | **6** |
+| parity_errors | **12** |
+| wrong_eye / wrong_hold | **6 / 6** |
+| pair_renders / pair_gen | **22,397 / 22,397** |
+| pair_unpresented_discards | **1,393** (**6.2196%**) |
+| first_eye_L / first_eye_R | **21,004 / 21,004** |
+| first_eye_L_misses / R_misses | **0 / 0** |
+| fence_checks / fence_promotions | 39,461 / 21,003 |
+| fence_deferrals | 18,457 (not equivalent to drops) |
+| fence_errors / commit_errors / pair_update_skips | **0 / 0 / 0** |
+
+The identity `22,397 rendered − 1,393
+superseded = 21,004 first L` holds exactly,
+as does `first_eye_R = first_eye_L`.
+The new PTS-to-L instrumentation is **valid
+and effective**:
+
+```text
+Stereo PTS final:
+first_L_confirmed=21004 valid_pts=21004 missing_pts=0
+segments=1 discontinuities=0 frame_id_gaps=1393
+cycles_1=1576 cycles_2=8315 cycles_3=7954 cycles_4plus=3158
+scanout_span_s=933.358733 movie_pts_span_s=934.100000
+relative_drift_last_ms=-741.267 relative_drift_avg_ms=-290.015
+relative_drift_min_ms=-757.938 relative_drift_max_ms=161.159
+trace_samples_total=183 ust_monotonic=1
+```
+
+All **21,004** first-L confirmed records have
+valid movie PTS; precisely **1,393 skipped VO
+frame IDs**, matching the producer's discarded
+pending generations. This establishes that
+staging discards correspond to **real absent
+source/movie-frame presentations**, not merely
+internal GBM churn. No seeking or reset detected.
+
+Movie-frame pacing between consecutive first-L
+presentations is not ideal 2/3-cycle pulldown:
+**1 cycle: 1,576 (7.5%); 2 cycles: 8,315;
+3 cycles: 7,954; >=4 cycles: 3,158 (15.0%)**.
+Only **77.46%** of intervals are 2/3 cycles.
+The 1-cycle and >=4-cycle intervals are relevant
+to visible judder/stutter; a correct clock
+alone does not guarantee smooth pacing.
+
+The trace contains 183 bounded snapshots.
+Raw `relative_drift_last_ms=-741.267` is
+**NOT 741ms of A/V desynchronization**:
+its formula subtracts *unadjusted source
+movie-PTS time* from KMS physical elapsed
+time. For a 23.976023976fps film on
+59.998795Hz logical display, normal
+`display-resample` speed adjustment toward
+2.5 logical L/R cycles/frame is
+`59.998795/(23.976023976*2.5)
+= 1.000979897` (~+0.0980%).
+Expected relative trend approximately
+**-0.979 ms per second of source PTS**.
+A linear fit of trace points after the
+initial 20 seconds has slope **-0.941
+ms/s**, intercept ~142ms and detrended
+residual SD ~**9.2ms** (10th–90th
+percentiles about -11.4 to +12.1ms).
+This largely matches the expected speed
+correction, with some phase jitter;
+it does NOT directly prove synchronization
+to audio hardware's clock or measure
+absolute audio-to-photon latency.
+
+**High-confidence instrumentation interference
+clue from complete timestamp correlation:**
+All **six** physical `DRM SBS gap` warnings
+(at 145.352, 353.190, 386.024, 573.453,
+706.797 and 793.132 seconds) appear exactly
+**17–20ms after** an individual
+`Stereo unpresented pair discarded:` log
+(at 145.335, 353.171, 386.005, 573.433,
+706.778, 793.115s). Five are at the
+per-100 drop-report milestones (counts 200,
+300, 600, 900, 1100); the first at logged
+count 37. The corresponding callback's
+`prev_callback_lag_ms` reached
+**8.18–12.01ms** and
+`submit_after_callback_ms` stayed
+**0.008–0.021ms**. This strongly
+implicates potentially blocking synchronous
+`MP_INFO` logging from
+`stereo_note_unpresented_pair()`, executed
+under `stereo.mutex` on the producer thread.
+Not yet causal proof: comparable stress,
+logging disabled with all other settings
+unchanged, is needed. The prior
+`--drm-stereo-stats=no` suppressed only the
+per-120-flip `DRM SBS test` report;
+it still printed the first 40 discarded
+pairs then one per 100, exactly 53 events
+in this run.
+
+**Follow-up code fix after the run:**
+`stereo_note_unpresented_pair()` now
+returns immediately in
+`--drm-stereo-stats=no` after incrementing
+the **exact cumulative count**. In
+quiet mode it no longer performs fence-poll
+diagnostics, formats or logs drop events
+under the pair mutex; the final
+`Stereo DRM final` and `Stereo PTS final`
+still report all aggregate losses and
+PTS/frame_id gaps after RT teardown.
+`DRM SBS gap` warning messages are
+retained. This is a controlled change
+to telemetry overhead, **not** to how
+GBM buffers are promoted or KMS flips.
+Rebuild and repeat a long quiet R-phase
+run to test whether the six missed
+physical slots disappear. Important:
+the severe **1,393 frame drops (6.22%)**
+are a separate scheduling problem and
+may persist even if KMS real-time
+scheduling becomes perfectly stable.
+
+Status: Source-only update, brace/anchor
+checked, target compilation still pending.
+Do not connect active USB shutters with
+any observed missed-vblank episodes.
