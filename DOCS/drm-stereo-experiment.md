@@ -2890,3 +2890,109 @@ not compiled or run on the target hardware.
 Log suffix still reports a shutdown-time DRM
 atomic EINVAL *after* playback termination;
 not an in-play atomic commit failure.
+
+
+### Thirtieth run: R-paced stereo, actual stats=no control, ~91.95s
+
+Uploaded log: `mpv-stereo-right-quiet.log`, mpv
+`v0.41.0-dev-g3e807a641` (Oct 19, 2026),
+physical 2560x1440@120Hz Intel i915 / Mesa TGL GT2,
+23.976fps Half-SBS film, `--drm-stereo-3d=yes`,
+`--drm-stereo-pacing-eye=right`,
+`--drm-stereo-stats=no`,
+`--video-sync=display-resample`, `--swapchain-depth=3`,
+`--log-file` still enabled. Player quit command
+at ~91.954s; shutdown ended ~92.096s.
+
+The new no-stats feature **is actually working**:
+**0** `DRM SBS test:` periodic INFO messages
+in the 1,085-line log. There are **0**
+`DRM SBS gap` warnings and **0**
+`Stereo KMS flip failed` messages, with
+`SCHED_FIFO priority 10` startup confirmed and
+the mpv scheduler using `59.998795 FPS`.
+The last log line is a known shutdown-only
+`Failed to commit atomic request: Error number 22`,
+after the explicit quit and resource teardown,
+not evidence of an in-play KMS failure.
+
+**Do not interpret absence of the warnings as a
+measured zero `missed_vblanks` cumulative total.**
+With periodic stats disabled, this revision does
+not print its final KMS counters; the lack of
+warnings is strong evidence but not a full
+aggregate. There is also no direct calibrated
+PTS-to-photon/A-V offset measurement.
+
+The complete log has exactly **36**
+`Stereo unpresented pair discarded:` records,
+last `count=36`, all
+`reason=newer_generation`,
+`fence_L=1 fence_R=1` **at discard**.
+The first drop is an early startup
+generation (`gen=2` at 0.458s; only one
+L-boundary deferral and 16.853ms age);
+all other **35** pairs have exactly
+two earlier failed eligible L-promotion
+fence polls. For these 35:
+- first failed L-check age median
+  **15.147ms** (range 13.851–15.549ms);
+- second failed L-check age median
+  **31.851ms** (range 30.618–32.222ms);
+- producer replacement age median
+  **34.445ms** (range 33.248–37.820ms);
+- time from second failed L to replacement
+  median **2.491ms**, mean **2.918ms**
+  (range 1.370–7.202ms);
+- all `intermediate_R_probe_age_ms=-1`:
+  the producer replaced the pending pair
+  **before** the next R checkpoint, so
+  there was no opportunity for that probe.
+  Do not misinterpret unavailable probes
+  as GPU fence failure.
+
+The last logged discarded pair was at ~87.407s.
+Since the final cumulative
+`pair_renders` figure is unavailable,
+report **36 actual superseded generations**,
+not a precisely measured loss percentage.
+Using ~23.976fps for ~91.5s of active video
+would imply approximately 2,200 source-frame
+opportunities and a rough ~1.6% ratio, but
+this is an **estimate**, not a captured
+diagnostic denominator.
+
+Compared with the previous `right` A/B run
+(with INFO logs still enabled), 60s/4 discarded,
+this new 92s/36 discarded shows substantial
+run-to-run variability. Compared with earlier
+113s `right` 108 missed vblanks and 361
+pending discards, it is a clear improvement
+in observed KMS regularity, but not a
+reliable demonstration that verbose log output
+*caused* all the previous failures: the
+previous 60s run also succeeded **with INFO
+logging still active**. More controlled
+matched-length, matched-film-time A/B repeats
+are required for causation.
+
+**Next source improvement after this run:**
+A single `Stereo DRM final:` snapshot is now
+printed from `drm_egl_uninit` **after joining
+the realtime KMS worker**, but before tearing
+down the DRM state. It includes physical flips,
+missed vblanks, parity/wrong-eye/hold errors,
+pair render/generation counts, unpresented pair
+discards, first L/R submissions and their
+misses, fence checks/promotions/deferrals/errors,
+pair update skips and atomic commit errors.
+This adds **no per-refresh or periodic logging**
+while `--drm-stereo-stats=no`, and future
+quiet-mode runs can calculate actual drop
+percentages without guessing source cadence.
+Needs rebuilding; no target-host compilation yet.
+
+The right-pacing phase remains experimental;
+avoid driving active shutter glasses while
+its physical reliability under lengthy runs
+has not been independently established.
