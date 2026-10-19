@@ -107,6 +107,7 @@ const struct m_sub_options drm_conf = {
         {"drm-stereo-3d", OPT_BOOL(stereo_3d)},
         {"drm-stereo-pacing-eye", OPT_CHOICE(stereo_pacing_eye,
             {"left", 0}, {"right", 1})},
+        {"drm-stereo-stats", OPT_BOOL(stereo_stats)},
         {0},
     },
     .defaults = &(const struct drm_opts) {
@@ -114,6 +115,7 @@ const struct m_sub_options drm_conf = {
         .draw_plane = DRM_OPTS_PRIMARY_PLANE,
         .drmprime_video_plane = DRM_OPTS_OVERLAY_PLANE,
         .drm_format = DRM_OPTS_FORMAT_XRGB8888,
+        .stereo_stats = true,
     },
     .size = sizeof(struct drm_opts),
 };
@@ -1136,107 +1138,109 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                                                   drm->stereo_last_report_target_misses;
             const uint64_t window_discards = drm->stereo_queue_discards -
                                              drm->stereo_last_report_queue_discards;
-            MP_INFO(drm, "DRM SBS test: flips=%llu shown_hz=%.3f "
-                    "window_hz=%.3f window_missed=%llu window_parity=%llu "
-                    "missed_vblanks=%llu parity_errors=%llu max_gap=%u "
-                    "wrong_eye=%llu window_wrong_eye=%llu "
-                    "wrong_hold=%llu window_wrong_hold=%llu "
-                    "recovery=%s corrections=%llu "
-                    "slot=%s pending=%u peak_pending=%u discards=%llu window_discards=%llu "
-                    "target_misses=%llu window_target_misses=%llu "
-                    "max_commit_callback_ms=%.3f max_draw_callback_ms=%.3f "
-                    "max_submit_after_callback_ms=%.3f "
-                    "max_atomic_ioctl_ms=%.3f "
-                    "ust_monotonic=%s negative_callback_lags=%llu "
-                    "min_callback_lag_ms=%.6f max_callback_lag_ms=%.3f "
-                    "min_submit_after_ust_ms=%.6f max_submit_after_ust_ms=%.3f "
-                    "pair=%s pair_gen=%llu pair_renders=%llu "
-                    "pair_reuse_flips=%llu pair_update_skips=%llu "
-                    "pair_unpresented_discards=%llu "
-                    "first_eye_L=%llu first_eye_R=%llu "
-                    "first_eye_L_misses=%llu first_eye_R_misses=%llu "
-                    "first_age_L_min_ms=%.3f first_age_L_avg_ms=%.3f "
-                    "first_age_L_max_ms=%.3f "
-                    "first_age_R_min_ms=%.3f first_age_R_avg_ms=%.3f "
-                    "first_age_R_max_ms=%.3f "
-                    "legacy=%s legacy_flips=%llu legacy_fallbacks=%llu "
-                    "pair_seq=%s pair_catchups=%llu "
-                    "gpu_wait=%s gpu_waits=%llu max_gpu_wait_ms=%.3f "
-                    "native_fence=%s fence_checks=%llu fence_promotions=%llu "
-                    "fence_deferrals=%llu fence_unready_L=%llu "
-                    "fence_unready_R=%llu fence_errors=%llu "
-                    "draws=%llu commit_errors=%llu msc=%u eye=%s "
-                    "(video output only; USB disabled)\n",
-                    (unsigned long long)drm->stereo_flips, shown_hz,
-                    window_hz,
-                    (unsigned long long)window_missed,
-                    (unsigned long long)window_parity,
-                    (unsigned long long)drm->stereo_missed_slots,
-                    (unsigned long long)drm->stereo_parity_errors,
-                    drm->stereo_max_gap,
-                    (unsigned long long)drm->stereo_absolute_eye_errors,
-                    (unsigned long long)window_absolute,
-                    (unsigned long long)drm->stereo_wrong_hold_slots,
-                    (unsigned long long)window_hold,
-                    drm->stereo_recover && !drm->stereo_slot_mode ? "on" : "off",
-                    (unsigned long long)drm->stereo_corrections,
-                    drm->stereo_slot_mode ? "on" : "off",
-                    drm->stereo_queue_ahead,
-                    drm->stereo_queue_peak,
-                    (unsigned long long)drm->stereo_queue_discards,
-                    (unsigned long long)window_discards,
-                    (unsigned long long)drm->stereo_target_misses,
-                    (unsigned long long)window_target_misses,
-                    drm->stereo_max_commit_callback_ns / 1000000.0,
-                    drm->stereo_max_draw_callback_ns / 1000000.0,
-                    drm->stereo_max_submit_after_callback_ns / 1000000.0,
-                    drm->stereo_max_commit_ioctl_ns / 1000000.0,
-                    drm->stereo_ust_monotonic ? "on" : "off",
-                    (unsigned long long)drm->stereo_negative_callback_lags,
-                    drm->stereo_min_callback_lag_ns / 1000000.0,
-                    drm->stereo_max_callback_lag_ns / 1000000.0,
-                    drm->stereo_min_submit_after_ust_ns / 1000000.0,
-                    drm->stereo_max_submit_after_ust_ns / 1000000.0,
-                    drm->stereo_pair_mode ? "on" : "off",
-                    (unsigned long long)drm->stereo_pair_display_generation,
-                    (unsigned long long)drm->stereo_pair_rendered,
-                    (unsigned long long)drm->stereo_pair_repeated_flips,
-                    (unsigned long long)drm->stereo_pair_update_skips,
-                    (unsigned long long)drm->stereo_pair_unpresented_discards,
-                    (unsigned long long)drm->stereo_pair_eye_first_flips[0],
-                    (unsigned long long)drm->stereo_pair_eye_first_flips[1],
-                    (unsigned long long)drm->stereo_pair_eye_first_misses[0],
-                    (unsigned long long)drm->stereo_pair_eye_first_misses[1],
-                    drm->stereo_pair_first_age_min_ns[0] / 1000000.0,
-                    drm->stereo_pair_eye_first_flips[0]
-                        ? drm->stereo_pair_first_age_sum_ns[0] /
-                          (1000000.0 * drm->stereo_pair_eye_first_flips[0])
-                        : 0.0,
-                    drm->stereo_pair_first_age_max_ns[0] / 1000000.0,
-                    drm->stereo_pair_first_age_min_ns[1] / 1000000.0,
-                    drm->stereo_pair_eye_first_flips[1]
-                        ? drm->stereo_pair_first_age_sum_ns[1] /
-                          (1000000.0 * drm->stereo_pair_eye_first_flips[1])
-                        : 0.0,
-                    drm->stereo_pair_first_age_max_ns[1] / 1000000.0,
-                    drm->stereo_pair_legacy_mode ? "on" : "off",
-                    (unsigned long long)drm->stereo_pair_legacy_flips,
-                    (unsigned long long)drm->stereo_pair_legacy_fallbacks,
-                    drm->stereo_pair_sequence_mode ? "on" : "off",
-                    (unsigned long long)drm->stereo_pair_sequence_catchups,
-                    drm->stereo_pair_gpu_wait ? "on" : "off",
-                    (unsigned long long)drm->stereo_pair_gpu_waits,
-                    drm->stereo_max_gpu_wait_ns / 1000000.0,
-                    drm->stereo_pair_native_fence ? "on" : "off",
-                    (unsigned long long)drm->stereo_pair_fence_checks,
-                    (unsigned long long)drm->stereo_pair_fence_promotions,
-                    (unsigned long long)drm->stereo_pair_fence_deferrals,
-                    (unsigned long long)drm->stereo_pair_fence_unready_eye[0],
-                    (unsigned long long)drm->stereo_pair_fence_unready_eye[1],
-                    (unsigned long long)drm->stereo_pair_fence_errors,
-                    (unsigned long long)drm->stereo_draws,
-                    (unsigned long long)drm->stereo_commit_errors, msc,
-                    drm->stereo_flip_eye ? "R" : "L");
+            if (drm->opts && drm->opts->stereo_stats) {
+                MP_INFO(drm, "DRM SBS test: flips=%llu shown_hz=%.3f "
+                        "window_hz=%.3f window_missed=%llu window_parity=%llu "
+                        "missed_vblanks=%llu parity_errors=%llu max_gap=%u "
+                        "wrong_eye=%llu window_wrong_eye=%llu "
+                        "wrong_hold=%llu window_wrong_hold=%llu "
+                        "recovery=%s corrections=%llu "
+                        "slot=%s pending=%u peak_pending=%u discards=%llu window_discards=%llu "
+                        "target_misses=%llu window_target_misses=%llu "
+                        "max_commit_callback_ms=%.3f max_draw_callback_ms=%.3f "
+                        "max_submit_after_callback_ms=%.3f "
+                        "max_atomic_ioctl_ms=%.3f "
+                        "ust_monotonic=%s negative_callback_lags=%llu "
+                        "min_callback_lag_ms=%.6f max_callback_lag_ms=%.3f "
+                        "min_submit_after_ust_ms=%.6f max_submit_after_ust_ms=%.3f "
+                        "pair=%s pair_gen=%llu pair_renders=%llu "
+                        "pair_reuse_flips=%llu pair_update_skips=%llu "
+                        "pair_unpresented_discards=%llu "
+                        "first_eye_L=%llu first_eye_R=%llu "
+                        "first_eye_L_misses=%llu first_eye_R_misses=%llu "
+                        "first_age_L_min_ms=%.3f first_age_L_avg_ms=%.3f "
+                        "first_age_L_max_ms=%.3f "
+                        "first_age_R_min_ms=%.3f first_age_R_avg_ms=%.3f "
+                        "first_age_R_max_ms=%.3f "
+                        "legacy=%s legacy_flips=%llu legacy_fallbacks=%llu "
+                        "pair_seq=%s pair_catchups=%llu "
+                        "gpu_wait=%s gpu_waits=%llu max_gpu_wait_ms=%.3f "
+                        "native_fence=%s fence_checks=%llu fence_promotions=%llu "
+                        "fence_deferrals=%llu fence_unready_L=%llu "
+                        "fence_unready_R=%llu fence_errors=%llu "
+                        "draws=%llu commit_errors=%llu msc=%u eye=%s "
+                        "(video output only; USB disabled)\n",
+                        (unsigned long long)drm->stereo_flips, shown_hz,
+                        window_hz,
+                        (unsigned long long)window_missed,
+                        (unsigned long long)window_parity,
+                        (unsigned long long)drm->stereo_missed_slots,
+                        (unsigned long long)drm->stereo_parity_errors,
+                        drm->stereo_max_gap,
+                        (unsigned long long)drm->stereo_absolute_eye_errors,
+                        (unsigned long long)window_absolute,
+                        (unsigned long long)drm->stereo_wrong_hold_slots,
+                        (unsigned long long)window_hold,
+                        drm->stereo_recover && !drm->stereo_slot_mode ? "on" : "off",
+                        (unsigned long long)drm->stereo_corrections,
+                        drm->stereo_slot_mode ? "on" : "off",
+                        drm->stereo_queue_ahead,
+                        drm->stereo_queue_peak,
+                        (unsigned long long)drm->stereo_queue_discards,
+                        (unsigned long long)window_discards,
+                        (unsigned long long)drm->stereo_target_misses,
+                        (unsigned long long)window_target_misses,
+                        drm->stereo_max_commit_callback_ns / 1000000.0,
+                        drm->stereo_max_draw_callback_ns / 1000000.0,
+                        drm->stereo_max_submit_after_callback_ns / 1000000.0,
+                        drm->stereo_max_commit_ioctl_ns / 1000000.0,
+                        drm->stereo_ust_monotonic ? "on" : "off",
+                        (unsigned long long)drm->stereo_negative_callback_lags,
+                        drm->stereo_min_callback_lag_ns / 1000000.0,
+                        drm->stereo_max_callback_lag_ns / 1000000.0,
+                        drm->stereo_min_submit_after_ust_ns / 1000000.0,
+                        drm->stereo_max_submit_after_ust_ns / 1000000.0,
+                        drm->stereo_pair_mode ? "on" : "off",
+                        (unsigned long long)drm->stereo_pair_display_generation,
+                        (unsigned long long)drm->stereo_pair_rendered,
+                        (unsigned long long)drm->stereo_pair_repeated_flips,
+                        (unsigned long long)drm->stereo_pair_update_skips,
+                        (unsigned long long)drm->stereo_pair_unpresented_discards,
+                        (unsigned long long)drm->stereo_pair_eye_first_flips[0],
+                        (unsigned long long)drm->stereo_pair_eye_first_flips[1],
+                        (unsigned long long)drm->stereo_pair_eye_first_misses[0],
+                        (unsigned long long)drm->stereo_pair_eye_first_misses[1],
+                        drm->stereo_pair_first_age_min_ns[0] / 1000000.0,
+                        drm->stereo_pair_eye_first_flips[0]
+                            ? drm->stereo_pair_first_age_sum_ns[0] /
+                              (1000000.0 * drm->stereo_pair_eye_first_flips[0])
+                            : 0.0,
+                        drm->stereo_pair_first_age_max_ns[0] / 1000000.0,
+                        drm->stereo_pair_first_age_min_ns[1] / 1000000.0,
+                        drm->stereo_pair_eye_first_flips[1]
+                            ? drm->stereo_pair_first_age_sum_ns[1] /
+                              (1000000.0 * drm->stereo_pair_eye_first_flips[1])
+                            : 0.0,
+                        drm->stereo_pair_first_age_max_ns[1] / 1000000.0,
+                        drm->stereo_pair_legacy_mode ? "on" : "off",
+                        (unsigned long long)drm->stereo_pair_legacy_flips,
+                        (unsigned long long)drm->stereo_pair_legacy_fallbacks,
+                        drm->stereo_pair_sequence_mode ? "on" : "off",
+                        (unsigned long long)drm->stereo_pair_sequence_catchups,
+                        drm->stereo_pair_gpu_wait ? "on" : "off",
+                        (unsigned long long)drm->stereo_pair_gpu_waits,
+                        drm->stereo_max_gpu_wait_ns / 1000000.0,
+                        drm->stereo_pair_native_fence ? "on" : "off",
+                        (unsigned long long)drm->stereo_pair_fence_checks,
+                        (unsigned long long)drm->stereo_pair_fence_promotions,
+                        (unsigned long long)drm->stereo_pair_fence_deferrals,
+                        (unsigned long long)drm->stereo_pair_fence_unready_eye[0],
+                        (unsigned long long)drm->stereo_pair_fence_unready_eye[1],
+                        (unsigned long long)drm->stereo_pair_fence_errors,
+                        (unsigned long long)drm->stereo_draws,
+                        (unsigned long long)drm->stereo_commit_errors, msc,
+                        drm->stereo_flip_eye ? "R" : "L");
+            }
             drm->stereo_last_report_ust_us = when_us;
             drm->stereo_last_report_missed = drm->stereo_missed_slots;
             drm->stereo_last_report_parity = drm->stereo_parity_errors;
