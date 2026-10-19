@@ -95,6 +95,8 @@ struct stereo_pair {
     uint64_t frame_id;
     double media_pts;
     bool pts_valid;
+    int planned_vsyncs;
+    bool display_synced;
     // CPU time when BOTH eye GBM front buffers were published as a pair.
     int64_t ready_ns;
 };
@@ -994,6 +996,8 @@ static void *stereo_kms_thread(void *arg)
             drm->stereo_submit_frame_id = s->active.frame_id;
             drm->stereo_submit_media_pts = s->active.media_pts;
             drm->stereo_submit_pts_valid = s->active.pts_valid;
+            drm->stereo_submit_planned_vsyncs = s->active.planned_vsyncs;
+            drm->stereo_submit_display_synced = s->active.display_synced;
             drm->stereo_pair_first_eye_in_generation =
                 drm->stereo_pair_eye_last_submitted_generation[eye] !=
                 s->active.generation;
@@ -1167,7 +1171,8 @@ bool vo_drm_stereo_pair_can_capture(struct ra_ctx *ctx)
 // -> active alongside the BOs; no extra release ordering or PTS queue exists.
 void vo_drm_stereo_pair_set_frame_info(struct ra_ctx *ctx,
                                        uint64_t frame_id, double media_pts,
-                                       bool pts_valid)
+                                       bool pts_valid, int planned_vsyncs,
+                                       bool display_synced)
 {
     struct priv *p = ctx->priv;
     struct stereo_kms *s = &p->stereo;
@@ -1177,6 +1182,8 @@ void vo_drm_stereo_pair_set_frame_info(struct ra_ctx *ctx,
     s->building.frame_id = frame_id;
     s->building.media_pts = media_pts;
     s->building.pts_valid = pts_valid;
+    s->building.planned_vsyncs = planned_vsyncs;
+    s->building.display_synced = display_synced;
     pthread_mutex_unlock(&s->mutex);
 }
 
