@@ -109,6 +109,9 @@ struct drm_opts {
     int drm_format;
     struct m_geometry draw_surface_size;
     int vrr_enabled;
+    // Half-SBS active-shutter experiment: mpv sees one logical refresh
+    // per completed L/R cycle while DRM keeps the physical mode unchanged.
+    bool stereo_3d;
 };
 
 struct vt_switcher {
