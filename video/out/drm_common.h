@@ -130,6 +130,20 @@ struct vt_switcher {
     void *handler_data[2];
 };
 
+// A bounded diagnostic snapshot of a confirmed FIRST LEFT stereo scanout.
+// These are sampled in the DRM callback and printed only after the RT thread
+// exits. UST is a DRM CLOCK_MONOTONIC vblank timestamp, NOT mp_time_ns().
+#define DRM_STEREO_PTS_TRACE_CAP 256
+struct drm_stereo_pts_sample {
+    uint64_t frame_id;
+    uint64_t generation;
+    uint32_t msc;
+    uint64_t ust_us;
+    double media_pts;
+    double relative_drift_ms; // versus first confirmed L in this PTS segment
+    uint32_t cycles_since_previous; // physical MSC delta / 2, 0 for anchor
+};
+
 struct vo_drm_state {
     drmModeConnector *connector;
     drmModeEncoder *encoder;
@@ -265,6 +279,29 @@ struct vo_drm_state {
     uint64_t stereo_pair_update_skips;
     // Pairs replaced/dropped while pending, before their first KMS flip.
     uint64_t stereo_pair_unpresented_discards;
+
+    // Submitted generation metadata, transferred atomically from stereo_pair
+    // while KMS submits the FB. The callback runs only for the in-flight flip.
+    uint64_t stereo_submit_frame_id;
+    double stereo_submit_media_pts;
+    bool stereo_submit_pts_valid;
+    // First LEFT presentation telemetry (no per-frame KMS logging).
+    uint64_t stereo_pts_first_L, stereo_pts_valid_L, stereo_pts_missing_L;
+    uint64_t stereo_pts_segments, stereo_pts_discontinuities;
+    uint64_t stereo_pts_id_gaps;
+    uint64_t stereo_pts_cycles_1, stereo_pts_cycles_2;
+    uint64_t stereo_pts_cycles_3, stereo_pts_cycles_4plus;
+    uint32_t stereo_pts_last_msc;
+    uint64_t stereo_pts_first_ust_us, stereo_pts_last_ust_us;
+    uint64_t stereo_pts_segment_anchor_ust_us;
+    double stereo_pts_segment_anchor_media_pts;
+    double stereo_pts_last_media_pts;
+    uint64_t stereo_pts_last_frame_id;
+    double stereo_pts_last_drift_ms, stereo_pts_drift_min_ms;
+    double stereo_pts_drift_max_ms, stereo_pts_drift_sum_ms;
+    struct drm_stereo_pts_sample stereo_pts_trace[DRM_STEREO_PTS_TRACE_CAP];
+    uint64_t stereo_pts_trace_total;
+
     // CPU publication-to-first-submission ages. These do NOT measure
     // optical scanout or actual audio-video latency.
     int64_t stereo_pair_first_age_sum_ns[2];
@@ -301,6 +338,9 @@ void vo_drm_release_crtc(struct vo_drm_state *drm);
 struct ra_ctx;
 bool vo_drm_stereo_pair_begin_eye(struct ra_ctx *ctx, int eye);
 bool vo_drm_stereo_pair_can_capture(struct ra_ctx *ctx);
+void vo_drm_stereo_pair_set_frame_info(struct ra_ctx *ctx,
+                                       uint64_t frame_id, double media_pts,
+                                       bool pts_valid);
 // Pace the mpv display-synced VO independently of the KMS scanout worker.
 void vo_drm_stereo_pair_wait_vsync(struct ra_ctx *ctx);
 
