@@ -295,6 +295,7 @@ struct vo_drm_state {
     uint64_t stereo_pts_first_ust_us, stereo_pts_last_ust_us;
     uint64_t stereo_pts_segment_anchor_ust_us;
     double stereo_pts_segment_anchor_media_pts;
+    double stereo_pts_first_media_pts;
     double stereo_pts_last_media_pts;
     uint64_t stereo_pts_last_frame_id;
     double stereo_pts_last_drift_ms, stereo_pts_drift_min_ms;
