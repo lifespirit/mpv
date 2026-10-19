@@ -1320,6 +1320,44 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
         pthread_mutex_unlock(&s->mutex);
         if (s->started)
             pthread_join(s->thread, NULL);
+
+        // Print one final snapshot after the KMS worker has stopped, never
+        // in the 120Hz page-flip callback. In particular, this preserves
+        // accurate totals with --drm-stereo-stats=no and does not perturb
+        // the realtime scanout schedule. Keep the snapshot before DRM is
+        // torn down so all counters are still accessible.
+        struct vo_drm_state *drm = ctx->vo->drm;
+        if (drm && drm->stereo_test_enabled) {
+            MP_INFO(ctx, "Stereo DRM final: flips=%llu "
+                    "missed_vblanks=%llu parity_errors=%llu "
+                    "wrong_eye=%llu wrong_hold=%llu "
+                    "pair_renders=%llu pair_gen=%llu "
+                    "pair_unpresented_discards=%llu "
+                    "first_eye_L=%llu first_eye_R=%llu "
+                    "first_eye_L_misses=%llu first_eye_R_misses=%llu "
+                    "fence_checks=%llu fence_promotions=%llu "
+                    "fence_deferrals=%llu fence_errors=%llu "
+                    "pair_update_skips=%llu commit_errors=%llu "
+                    "(scanout telemetry, no USB)\n",
+                    (unsigned long long)drm->stereo_flips,
+                    (unsigned long long)drm->stereo_missed_slots,
+                    (unsigned long long)drm->stereo_parity_errors,
+                    (unsigned long long)drm->stereo_absolute_eye_errors,
+                    (unsigned long long)drm->stereo_wrong_hold_slots,
+                    (unsigned long long)drm->stereo_pair_rendered,
+                    (unsigned long long)drm->stereo_pair_display_generation,
+                    (unsigned long long)drm->stereo_pair_unpresented_discards,
+                    (unsigned long long)drm->stereo_pair_eye_first_flips[0],
+                    (unsigned long long)drm->stereo_pair_eye_first_flips[1],
+                    (unsigned long long)drm->stereo_pair_eye_first_misses[0],
+                    (unsigned long long)drm->stereo_pair_eye_first_misses[1],
+                    (unsigned long long)drm->stereo_pair_fence_checks,
+                    (unsigned long long)drm->stereo_pair_fence_promotions,
+                    (unsigned long long)drm->stereo_pair_fence_deferrals,
+                    (unsigned long long)drm->stereo_pair_fence_errors,
+                    (unsigned long long)drm->stereo_pair_update_skips,
+                    (unsigned long long)drm->stereo_commit_errors);
+        }
     }
 
     // Stop referencing the BOs on the display before releasing the GBM
