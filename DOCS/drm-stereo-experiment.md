@@ -2996,3 +2996,129 @@ The right-pacing phase remains experimental;
 avoid driving active shutter glasses while
 its physical reliability under lengthy runs
 has not been independently established.
+
+
+### Thirty-first experiment: matched quiet-mode LEFT / RIGHT pacing A/B
+
+User uploaded two complete logs on Oct 19, 2026:
+- `mpv-stereo-left-quiet.log`
+- `mpv-stereo-right-quiet(1).log`
+
+Both run **the exact same built mpv commit**
+`v0.41.0-dev-gdf3cf3d9b`, same Intel i915 /
+Mesa Tiger Lake hardware and 2560x1440@120 DP,
+23.976 fps Half-SBS *Venom* source,
+`--drm-stereo-3d=yes`,
+`--video-sync=display-resample`,
+`--swapchain-depth=3`,
+`--hwdec=auto`,
+`--drm-stereo-stats=no`.
+Only `--drm-stereo-pacing-eye` changed:
+`left` versus `right`.
+Both logged `Assuming 59.998795 FPS for
+display sync`, `Video sync mode enabled`,
+and `Stereo KMS thread scheduling:
+SCHED_FIFO priority 10`.
+Both shutdown cleanly after explicit quit
+except for a **post-playback** DRM teardown
+atomic EINVAL message. There were no
+`DRM SBS test` periodic reports in either log.
+The new `Stereo DRM final:` after-RT-thread
+snapshot worked.
+
+| Final counters | left | right |
+|---|---:|---:|
+| Last physical KMS flips | 13,983 | 13,649 |
+| Approx. KMS time at 119.997 Hz | 116.5s | 113.7s |
+| `missed_vblanks` | **0** | **0** |
+| `wrong_eye` / `wrong_hold` | **0 / 0** | **0 / 0** |
+| `parity_errors` | **0** | **0** |
+| `first_eye_L_misses` / R misses | 0 / 0 | 0 / 0 |
+| `pair_renders` | 2,794 | 2,727 |
+| `pair_gen` | 2,794 | 2,727 |
+| `pair_unpresented_discards` | **48** | **19** |
+| Drop fraction per render | **1.718%** | **0.697%** |
+| `first_eye_L` | 2,746 | 2,708 |
+| `first_eye_R` | 2,746 | 2,707 |
+| `fence_checks` | 5,604 | 4,296 |
+| `fence_promotions` | 2,745 | 2,707 |
+| `fence_deferrals` | **2,858** | **1,588** |
+| `fence_errors` | 0 | 0 |
+| `pair_update_skips` | 0 | 0 |
+| `commit_errors` | 0 | 0 |
+
+In this A/B run R-pacing cut the fraction
+of prepared pairs overwritten without being
+shown to **40.6%** of the L result (about
+**2.47x fewer**). This is not a strict
+repeatable performance guarantee; the scene
+windows differ by roughly 3 seconds and
+previous R-pacing runs varied dramatically.
+
+Exact event diagnostics:
+- Left: **40 individual overwrite messages**
+  are logged due to the first-40 diagnostic cap;
+  final cumulative total is **48**. Every logged
+  loss had `left_boundary_fence_deferrals=2`,
+  with both `fence_L=1` and `fence_R=1`
+  *at producer replacement*.
+  Failed L-boundary ages median **6.735ms**
+  and **23.389ms**, intermediate R probe
+  age median ~31.8ms, producer replacement
+  median **33.515ms**. At intermediate R,
+  the right fence was still unsignaled in
+  **26/40** events and both fences were
+  ready in **14/40**.
+- Right: all **19** discard messages are logged
+  and each has exactly two failed L promotions.
+  First failed L age median **15.159ms**,
+  second **31.851ms**, replacement median
+  **33.848ms**. All 19 had both fences ready
+  *at replacement*. The intermediate R probe
+  was absent in **18/19** because they were
+  overwritten before it; in the one probed
+  case R fence remained unsignaled at the R
+  event (`intermediate_R_fence_L=1`,
+  `intermediate_R_fence_R=0`).
+- Thus R-pacing shifted the first two eligible
+  L-promotions later by approximately **8.4ms**
+  in publication-relative pair age, while
+  overwrites still occurred around
+  **33–35ms**. This gives GPU work more time
+  before the first two allowed promotions and
+  plausibly explains fewer unpresented pairs.
+  This is a causal hypothesis consistent with
+  the observed fence timing, not a direct GPU
+  completion timestamp.
+
+Important distinction: **`fence_deferrals`
+count missed individual readiness checks, not
+dropped video frames**. The diagnostic
+`pair_unpresented_discards` counts producer
+staging generations that never reached KMS.
+They may not coincide with mpv's own
+`Dropped` counter or directly measure A/V sync.
+Confirmed physical L/R parity is **not** an
+optical glasses phase measurement.
+
+Recommendation after this test:
+**retain selectable left and right modes**
+without changing defaults or adding latency
+buffers. Right currently has the stronger
+A/B result, but the earlier 113-second
+right-pacing test showed 108 missed vblanks
+and severe staging losses, while other runs
+showed zero misses; investigate sources of
+this run-to-run variability. A further
+10–15-minute R-pacing run with
+`--drm-stereo-stats=no` is a useful
+stability gate. Next development milestone
+should be an explicit, low-overhead
+association of **mpv vo_frame frame_id/PTS**
+with the stereo `generation` and its
+confirmed L-presentation time. That enables
+validation of A/V scheduling and *actual*
+movie-frame drops, instead of optimizing only
+buffer retention. Avoid assuming the
+R-pacing improvement alone establishes
+correct PTS-to-photon latency.
