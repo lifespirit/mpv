@@ -109,10 +109,15 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         // frame_id is mpv's stable ID for the current image, including
         // redraws (which are already suppressed above).
         const double media_pts = frame->current->pts;
+        // vo.c passes a copy of the first draw with the original requested
+        // num_vsyncs, before it decrements its own repeat counter. Do not
+        // use a later redraw/repeat's remaining num_vsyncs as the plan.
         vo_drm_stereo_pair_set_frame_info(p->ctx, frame->frame_id,
                                           media_pts,
                                           isfinite(media_pts) &&
-                                          media_pts != MP_NOPTS_VALUE);
+                                          media_pts != MP_NOPTS_VALUE,
+                                          frame->num_vsyncs,
+                                          frame->display_synced);
 
         const uint64_t previous_pairs = vo->drm->stereo_pair_rendered;
         for (int eye = 0; eye < 2; eye++) {
