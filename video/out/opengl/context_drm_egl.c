@@ -639,7 +639,13 @@ static void stereo_note_unpresented_pair(struct ra_ctx *ctx,
     struct vo_drm_state *drm = ctx->vo->drm;
     const struct stereo_pair *pair = &s->pending;
     uint64_t count = ++drm->stereo_pair_unpresented_discards;
-    if (count > 40 && count % 100 != 0)
+    // This function runs on the producer while stereo.mutex is held.
+    // Writing a logfile here can starve the 120Hz SCHED_FIFO KMS worker.
+    // In quiet mode keep the exact discard count (and later frame_id_gaps)
+    // but do not poll fences, format, or log individual drop records.
+    // The final snapshot is emitted after the worker has been joined.
+    if ((drm->opts && !drm->opts->stereo_stats) ||
+        (count > 40 && count % 100 != 0))
         return;
 
     int64_t now_ns = mp_time_ns();
