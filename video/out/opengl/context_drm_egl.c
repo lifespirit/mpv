@@ -90,6 +90,11 @@ struct stereo_pair {
     int intermediate_r_fence_L;
     int intermediate_r_fence_R;
     uint64_t generation;
+    // Source movie identity carried from mpv's VO to the first confirmed L.
+    // PTS is in MEDIA seconds (not an mp_time_ns realtime target).
+    uint64_t frame_id;
+    double media_pts;
+    bool pts_valid;
     // CPU time when BOTH eye GBM front buffers were published as a pair.
     int64_t ready_ns;
 };
@@ -646,6 +651,7 @@ static void stereo_note_unpresented_pair(struct ra_ctx *ctx,
         ? stereo_debug_fence_ready(pair->fence_fd[1]) : -1;
     MP_INFO(ctx, "Stereo unpresented pair discarded: "
             "reason=%s count=%llu pending_gen=%llu active_gen=%llu "
+            "frame_id=%llu movie_pts_s=%.6f pts_valid=%d "
             "pending_age_ms=%.3f fence_L=%d fence_R=%d "
             "left_boundary_fence_deferrals=%u "
             "first_deferral_age_ms=%.3f last_deferral_age_ms=%.3f "
@@ -656,6 +662,8 @@ static void stereo_note_unpresented_pair(struct ra_ctx *ctx,
             reason, (unsigned long long)count,
             (unsigned long long)pair->generation,
             (unsigned long long)s->active.generation,
+            (unsigned long long)pair->frame_id, pair->media_pts,
+            pair->pts_valid,
             age_ms, left, right, pair->fence_deferrals,
             pair->fence_deferrals
                 ? pair->first_fence_deferral_age_ns / 1000000.0 : -1.0,
@@ -956,6 +964,9 @@ static void *stereo_kms_thread(void *arg)
                       drm->stereo_commit_after_callback_ns);
             drm->stereo_commit_draw_time_ns = 0;
             drm->stereo_pair_display_generation = s->active.generation;
+            drm->stereo_submit_frame_id = s->active.frame_id;
+            drm->stereo_submit_media_pts = s->active.media_pts;
+            drm->stereo_submit_pts_valid = s->active.pts_valid;
             drm->stereo_pair_first_eye_in_generation =
                 drm->stereo_pair_eye_last_submitted_generation[eye] !=
                 s->active.generation;
@@ -1122,6 +1133,24 @@ bool vo_drm_stereo_pair_can_capture(struct ra_ctx *ctx)
         pthread_mutex_unlock(&s->mutex);
     }
     return available;
+}
+
+// Called from vo_gpu once per NEW movie frame, on the GL producer thread
+// BEFORE either eye is rendered. The metadata travels in building -> pending
+// -> active alongside the BOs; no extra release ordering or PTS queue exists.
+void vo_drm_stereo_pair_set_frame_info(struct ra_ctx *ctx,
+                                       uint64_t frame_id, double media_pts,
+                                       bool pts_valid)
+{
+    struct priv *p = ctx->priv;
+    struct stereo_kms *s = &p->stereo;
+    if (!s->enabled || !s->initialized)
+        return;
+    pthread_mutex_lock(&s->mutex);
+    s->building.frame_id = frame_id;
+    s->building.media_pts = media_pts;
+    s->building.pts_valid = pts_valid;
+    pthread_mutex_unlock(&s->mutex);
 }
 
 bool vo_drm_stereo_pair_begin_eye(struct ra_ctx *ctx, int eye)
