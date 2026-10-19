@@ -1116,6 +1116,110 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
         if (drm->stereo_pair_mode && drm->stereo_flip_eye == 0)
             drm->stereo_last_left_ust_us = when_us;
         ++drm->stereo_flips;
+
+        // Map the *actual confirmed* first LEFT scanout of each pair back
+        // to the mpv vo_frame ID and movie PTS copied on atomic submit.
+        // The DRM callback runs serially inside the 120Hz KMS worker, with
+        // the stereo mutex held. No per-frame logging or allocations here.
+        // Keep media PTS seconds and DRM CLOCK_MONOTONIC UST microseconds
+        // separate: they are different clocks and cannot be subtracted
+        // directly without anchoring to a first confirmed observation.
+        if (drm->stereo_pair_mode && drm->stereo_flip_eye == 0 &&
+            drm->stereo_pair_first_eye_in_generation) {
+            drm->stereo_pts_first_L++;
+            if (!drm->stereo_submit_pts_valid ||
+                !drm->stereo_submit_frame_id ||
+                !isfinite(drm->stereo_submit_media_pts)) {
+                drm->stereo_pts_missing_L++;
+            } else {
+                const double pts = drm->stereo_submit_media_pts;
+                const uint64_t id = drm->stereo_submit_frame_id;
+                uint32_t cycles = 0;
+                bool reset = !drm->stereo_pts_valid_L;
+                if (!reset) {
+                    uint32_t delta_msc = msc - drm->stereo_pts_last_msc;
+                    if (delta_msc > 0 && delta_msc < 1000 &&
+                        (delta_msc & 1u) == 0)
+                        cycles = delta_msc / 2u;
+                    if (cycles == 1)
+                        drm->stereo_pts_cycles_1++;
+                    else if (cycles == 2)
+                        drm->stereo_pts_cycles_2++;
+                    else if (cycles == 3)
+                        drm->stereo_pts_cycles_3++;
+                    else if (cycles >= 4)
+                        drm->stereo_pts_cycles_4plus++;
+
+                    if (id > drm->stereo_pts_last_frame_id + 1)
+                        drm->stereo_pts_id_gaps +=
+                            id - drm->stereo_pts_last_frame_id - 1;
+                    // Seek/reconfig or source PTS discontinuity: start a
+                    // new relative anchor, never accumulate stale drift.
+                    if (id <= drm->stereo_pts_last_frame_id ||
+                        pts < drm->stereo_pts_last_media_pts - 0.100 ||
+                        pts > drm->stereo_pts_last_media_pts + 5.0)
+                        reset = true;
+                }
+                if (reset) {
+                    if (drm->stereo_pts_valid_L)
+                        drm->stereo_pts_discontinuities++;
+                    drm->stereo_pts_segments++;
+                    drm->stereo_pts_segment_anchor_ust_us = when_us;
+                    drm->stereo_pts_segment_anchor_media_pts = pts;
+                    cycles = 0;
+                }
+
+                // This is relative display-time MINUS media-PTS elapsed,
+                // not a measurement of absolute audio-to-photon latency.
+                // --video-sync=display-resample may intentionally change
+                // playback speed, so long-run drift must be interpreted
+                // together with the player speed and A/V statistics.
+                const double relative_ms =
+                    ((double)((int64_t)when_us -
+                        (int64_t)drm->stereo_pts_segment_anchor_ust_us) /
+                        1000.0) -
+                    (pts - drm->stereo_pts_segment_anchor_media_pts) * 1000.0;
+
+                if (!drm->stereo_pts_valid_L) {
+                    drm->stereo_pts_first_ust_us = when_us;
+                    drm->stereo_pts_first_media_pts = pts;
+                    drm->stereo_pts_drift_min_ms = relative_ms;
+                    drm->stereo_pts_drift_max_ms = relative_ms;
+                } else {
+                    drm->stereo_pts_drift_min_ms =
+                        MPMIN(drm->stereo_pts_drift_min_ms, relative_ms);
+                    drm->stereo_pts_drift_max_ms =
+                        MPMAX(drm->stereo_pts_drift_max_ms, relative_ms);
+                }
+                drm->stereo_pts_valid_L++;
+                drm->stereo_pts_drift_sum_ms += relative_ms;
+                drm->stereo_pts_last_drift_ms = relative_ms;
+                drm->stereo_pts_last_ust_us = when_us;
+                drm->stereo_pts_last_media_pts = pts;
+                drm->stereo_pts_last_frame_id = id;
+                drm->stereo_pts_last_msc = msc;
+
+                // Bounded history: first 8 frames and one per 120 movie
+                // pictures (~5 seconds at 23.976 FPS), plus a segment
+                // restart. For 15 minutes this yields ~190 samples.
+                // Store scalars only; print them after pthread_join().
+                if (drm->stereo_pts_valid_L <= 8 ||
+                    drm->stereo_pts_valid_L % 120 == 0 || reset) {
+                    uint64_t pos = drm->stereo_pts_trace_total++ %
+                                   DRM_STEREO_PTS_TRACE_CAP;
+                    drm->stereo_pts_trace[pos] =
+                        (struct drm_stereo_pts_sample) {
+                            .frame_id = id,
+                            .generation = drm->stereo_pair_display_generation,
+                            .msc = msc,
+                            .ust_us = when_us,
+                            .media_pts = pts,
+                            .relative_drift_ms = relative_ms,
+                            .cycles_since_previous = cycles,
+                        };
+                }
+            }
+        }
         if (drm->stereo_flips % 120 == 0) {
             const uint64_t elapsed_us = when_us - drm->stereo_window_first_ust_us;
             const double shown_hz = elapsed_us > 0
