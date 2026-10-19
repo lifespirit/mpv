@@ -690,6 +690,23 @@ Available video output drivers are:
         latency. Do not override the display FPS to the physical 120 Hz
         when using this mode. (default: no)
 
+    ``--drm-stereo-pacing-eye=<left|right>``
+        Experimental choice of which confirmed physical eye refresh wakes
+        mpv's logical 60 Hz display-synced frame scheduler when
+        ``--drm-stereo-3d=yes``.
+
+        :left:  Pace mpv on L callbacks (default).
+        :right: Pace mpv on R callbacks, shifting producer scheduling by
+                approximately one physical refresh (~8.33 ms at 120 Hz).
+                This does **not** switch stereo generations on R or change
+                the L/R scanout sequence. Presentation timestamps continue
+                to describe the preceding physical L event.
+
+        The right-eye setting is a debugging/A-B option for the phase
+        relationship between rendering, GPU fence signaling and L-only
+        stereo-pair promotion. It may affect A/V latency and does not
+        guarantee fewer dropped source frames.
+
     ``--drm-vrr-enabled=<no|yes|auto>``
         Toggle use of Variable Refresh Rate (VRR), aka Freesync or Adaptive Sync
         on compatible systems. VRR allows for the display to be refreshed at any
