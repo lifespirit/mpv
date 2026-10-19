@@ -2457,3 +2457,123 @@ video generations versus KMS flips and
 publication-to-submit latency. Avoid
 synchronizing USB shutters until parity
 recovery and optical shutter timing are tested.
+
+
+### Twenty-sixth implementation: public --drm-stereo-3d=yes and logical 60 Hz VO
+
+A new **native mpv command-line option** is registered in
+`drm_conf`: `--drm-stereo-3d=<yes|no>` (default **no**).
+This is deliberately scoped to `--vo=gpu --gpu-context=drm`,
+120 Hz physical DRM/KMS and the existing **Half-SBS** input
+layout. It is **not** yet a generic stereo-format parser, an
+OSD stereo renderer or USB shutter-glasses driver.
+
+Example initial test (requires recompiling the fork):
+
+```sh
+mpv --no-config \
+  --vo=gpu --gpu-context=drm \
+  --drm-connector=DP-1 --drm-mode='2560x1440@120' \
+  --drm-vrr-enabled=no \
+  --drm-stereo-3d=yes \
+  --video-sync=display-resample \
+  --swapchain-depth=3 --hwdec=auto \
+  --log-file=/tmp/mpv-stereo-logical60.log \
+  /path/to/half-sbs.mkv
+```
+
+No `MPV_DRM_STEREO_SBS`, `MPV_DRM_STEREO_PAIR`,
+`MPV_DRM_STEREO_RT`, or
+`MPV_DRM_STEREO_NATIVE_FENCE` variables are
+needed for this new mode. It enables **paired L/R GBM
+scanout**, **the RT KMS worker**, and **EGL native GPU
+fence checks** by default. Lack of required native EGL
+fence extensions fails initialization rather than
+degrading to the formerly unstable non-fence path.
+The preexisting environmental settings remain as
+legacy experimental controls **when the new option is
+off**; they still report the physical 120 Hz cadence.
+
+**All three timing paths were modified together:**
+
+1. `VOCTRL_GET_DISPLAY_FPS` returns **half** the
+   actual DRM connector mode's refresh rate only when
+   `--drm-stereo-3d=yes`. The hardware mode selected
+   and `vo_drm_get_display_fps()` remain unchanged.
+   At measured 119.998Hz KMS refresh mpv sees
+   approximately **59.999Hz**.
+2. `drm_pflip_cb` continues counting and validating
+   **every physical L/R page-flip event** at 120 Hz.
+   But in this mode, the `present_sync` interface
+   receives **only completed L events** and a logical
+   MSC = physical MSC / 2 (integer division). The
+   latter is essential: merely feeding alternate
+   physical MSC values would make `present_sync`
+   divide 16.67ms by a two-count difference and
+   mistakenly estimate an **8.33ms** vsync period.
+   Logical consecutive L events now yield both a
+   ~16.67ms UST separation **and** a one-count MSC
+   difference for reliable mpv `get_vsync` pacing.
+3. The VO's `flip_page` uses the existing blocking
+   helper `vo_drm_stereo_pair_wait_vsync` but is
+   awakened **only after an L scanout callback**,
+   rather than every physical R callback too.
+   Meanwhile the standalone KMS worker keeps
+   alternating L/R at 120Hz, independent of the VO.
+
+Thus `player/video.c`'s existing
+`handle_display_sync_frame()` computes repeat counts
+and long-term A/V drift correction on logical **full
+L/R cycles** instead of individual eye exposures.
+For 23.976fps content on ~60Hz logical output the
+expected nominal frame cadence is approximately
+**2/3 full stereo cycles**. Eye-selection parity
+is still derived from **physical MSC**; no source
+film frame may begin with R.
+
+Startup diagnostics include:
+`DRM stereo 3D: physical 119.998 Hz L/R, logical
+59.999 Hz L-only player pacing and presentation
+feedback (native GPU fences on)`. At verbose log
+level, mpv VO should also announce
+`Assuming 59.999 FPS for display sync`.
+
+**Important limits of this first implementation:**
+- This changes VO cadence and presentation feedback,
+  not yet PTS-to-actual-GBM-generation accounting.
+  The KMS worker may still supersede a pending pair
+  before showing it. A zero mpv A/V error does NOT
+  prove exact audio-to-photon delay or zero staging
+  drops. Keep collecting `pair_unpresented_discards`,
+  eye first ages, `fence_errors`, physical flip
+  counters and `DRM SBS gap` events.
+- Do **not** set `--display-fps-override=120`: this
+  forces mpv's display-sync scheduler back to 120Hz
+  despite the new logical mode. Let auto-detection
+  use the DRM-reported half-rate value.
+- `--drm-stereo-3d=no` is the default for normal
+  2D playback. The old env-var experimental mode
+  remains intact for A/B comparison.
+- Physical monitor refresh remains 120Hz. The USB
+  glasses controller is **not enabled** and must
+  eventually follow confirmed physical eye phase,
+  never the half-rate film frame schedule.
+- This source update has **not been compiled on the
+  user's Arch / Intel test host**. Check option
+  parsing and playback logs first; only then perform
+  10-15min comparisons. Do not infer correctness
+  solely from code inspection.
+
+**A/B checklist:** with clean environment variables,
+compare 3D option **on** (logical ~60Hz, actual
+120Hz L/R KMS, expected 2/3 repeat scheduling)
+against old env-based paired mode with option **off**.
+The first test should verify exact physical
+`shown_hz`, `missed_vblanks`, `wrong_eye`,
+`fence_errors`, `pair_unpresented_discards` and
+film/audio times. A sufficiently long second test
+should compare total dropped pending pairs at equal
+content/GPU load. Further planned work: associate
+`vo_frame.frame_id` / PTS with physical
+`stereo_pair.generation` and report actual accepted
+versus superseded video frames to the player.
