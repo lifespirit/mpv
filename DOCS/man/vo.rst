@@ -707,6 +707,20 @@ Available video output drivers are:
         stereo-pair promotion. It may affect A/V latency and does not
         guarantee fewer dropped source frames.
 
+    ``--drm-stereo-stats=<yes|no>``
+        Enable or disable the detailed ``DRM SBS test:`` report every 120
+        physical page flips in experimental DRM stereo mode. (default: yes)
+
+        ``no`` skips formatting and logging this periodic diagnostic
+        inside the real-time KMS page-flip callback, while preserving the
+        underlying counters and error/warning messages. Useful for an A/B
+        test of instrumentation overhead without changing L/R scanout or
+        the 60 Hz logical scheduler.
+
+        Note that ``--msg-level=vo/gpu/drm=warn`` alone is not an
+        equivalent test when ``--log-file`` is set: mpv may still
+        save informational messages to its debug-level log file.
+
     ``--drm-vrr-enabled=<no|yes|auto>``
         Toggle use of Variable Refresh Rate (VRR), aka Freesync or Adaptive Sync
         on compatible systems. VRR allows for the display to be refreshed at any
