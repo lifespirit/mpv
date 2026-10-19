@@ -3917,3 +3917,127 @@ allowed to accumulate A/V lag.
 
 No runtime code modified in this documentation
 update; results are grounded in the user logs.
+
+
+### Thirty-eighth change: compare mpv requested num_vsyncs with confirmed KMS first-L cadence
+
+Implemented after the matched 120-second LEFT/RIGHT experiment at
+`--start=295 --length=120`. There are not yet any runtime logs from
+this instrumentation version.
+
+**Important original-plan semantics:** `player/video.c` computes
+`vo_frame.num_vsyncs` from `--video-sync=display-resample`, including
+intentional A/V-driven repeats/drops. `video/out/vo.c` consumes this
+value (decreasing its private `current_frame->num_vsyncs` after
+preparing the copy passed to `draw_frame`). The first `draw_frame`
+for a new `frame_id` receives the original requested count. Subsequent
+repeats/redraws of the same `frame_id` are filtered out by the stereo
+producer. Thus the new `stereo_pair.planned_vsyncs` is the **initial
+requested logical L/R cycles**, NOT the remaining counter at a later
+display callback. A boolean `display_synced` accompanies it.
+
+Metadata path:
+```text
+vo_gpu draw_frame: (frame_id, current->pts,
+                    original num_vsyncs, display_synced)
+  -> EGL producer stereo_pair.building
+  -> pending -> active
+  -> successful KMS commit: drm.stereo_submit_*
+  -> confirmed FIRST L event: sample + aggregate stats
+  -> after KMS pthread_join(): final summary and trace
+```
+
+The key timing rule: **the planned `num_vsyncs` for frame N
+describes how many logical display cycles it should be held
+BEFORE frame N+1 appears**. Hence at the confirmed first L
+of frame N+1, compare its physical MSC interval against the
+**prior confirmed frame's** `num_vsyncs`, not N+1's own
+request. Using N+1's count would systematically misattribute
+2/3 cadence and misdiagnose phase mismatch.
+
+A trustworthy plan-to-actual comparison is possible only
+when all conditions hold:
+- Both confirmed first-L records have valid media PTS, are
+  in the same monotonic timeline segment, and have
+  `frame_id(N+1) == frame_id(N)+1`.
+- Both frames are display-synced and the *prior* initial
+  `num_vsyncs` is nonnegative.
+- The physical MSC delta is positive, even, and small
+  enough to count full left/right cycles.
+A skipped frame ID may represent an upstream mpv drop
+or an EGL pending generation that did not reach the screen.
+The desired hold durations of those absent frames are
+not recoverable from presented-frame metadata, so such
+intervals are **excluded** from the comparison matrix
+and separately counted as skipped.
+
+Per-presentation hot-path bookkeeping is fixed-size
+integer/scalar updates only; **no per-frame logging,
+no allocation, no GPU fence wait**, unchanged KMS
+promotion timing. After the RT worker stops, mpv prints
+`Stereo plan final:`:
+- `planned_0/1/2/3/4plus` histogram over confirmed
+  valid-PTS, display-synced first-L frames.
+- `nondisplay` / `invalid_plan`: inappropriate
+  scheduling metadata.
+- `adjacent_compared`, `exact`, `mismatched`,
+  `signed_error_cycles`, `abs_error_cycles`.
+- `skipped_intervals` / `skipped_frame_ids`
+  for comparisons unavailable across missing pictures.
+- `invalid_msc` for bad physical cycle deltas.
+
+Five `Stereo plan row:` lines form a **5x5 contingency table**
+with rows = *previous picture's requested* 0,1,2,3,>=4
+logical cycles; columns = *actual first-L-to-first-L*
+0,1,2,3,>=4 cycles. Comparing the diagonal to off-diagonal
+reveals whether KMS is respecting the player's requested
+picture holds; the `exact` counter preserves exact numerical
+matches even inside the collapsed >=4 category.
+
+Existing `Stereo PTS sample:` teardown entries now contain:
+`mpv_planned_vsyncs` (current picture),
+`display_synced`,
+`previous_planned_vsyncs` (the previous confirmed
+picture, or -1 if not comparable),
+`skipped_frame_ids` (relative to the prior confirmed
+first-L, not relative to the previous sampled record),
+and `plan_comparable` (0/1).
+`cycles_from_prev` is still the observed first-L-to-first-L
+physical MSC delta / 2.
+
+Interpreting results:
+- A largely 2/3 planned histogram but a high off-diagonal
+  `Stereo plan row` mass under RIGHT means staging,
+  promotion or presentation feedback deviated from the
+  *requested* frame schedule.
+- Large off-diagonal errors under BOTH LEFT and RIGHT
+  mean the problem is not simply picking a producer
+  wakeup edge.
+- Large `skipped_intervals` with high `pair_unpresented_discards`
+  point to late GPU readiness + single-slot pending supersession.
+- If the requested distribution itself has many 1 or 4+
+  values, investigate mpv A/V corrections and video
+  scheduling before changing KMS promotion.
+- A large fraction of exact adjacent holds does **not**
+  mean no movie frames were dropped; inspect both counters.
+
+Recommended matched test commands (run separately, same binary):
+```sh
+git pull --ff-only && meson compile -C build
+for eye in left right; do
+    ./build/mpv --vo=gpu --gpu-context=drm \
+      --drm-connector=DP-1 --drm-mode=2560x1440@120 \
+      --drm-vrr-enabled=no --drm-stereo-3d=yes \
+      --drm-stereo-pacing-eye="$eye" --drm-stereo-stats=no \
+      --video-sync=display-resample --swapchain-depth=3 --hwdec=auto \
+      --start=295 --length=120 \
+      --log-file="/tmp/mpv-stereo-plan-${eye}.log" \
+      '/path/to/Half-SBS-film.mkv'
+done
+```
+Do not run both simultaneously. Normal end-of-length shutdown
+is required for final counters. The code was reviewed against
+the existing mpv frame lifecycle and cross-file metadata
+transfer, but **has not been compiled or run on the target Arch
+machine yet**. A quick launch check of `Stereo plan final`
+and `Stereo plan row` lines is worthwhile before full A/B.
