@@ -1019,13 +1019,13 @@ static void *stereo_kms_thread(void *arg)
                     MP_ERR(ctx, "Stereo DRM event processing failed\n");
                     s->stop = true;
                 } else if (!drm->waiting_for_flip) {
-                    // With --drm-stereo-3d, one complete L/R cycle is
-                    // one *logical* 60Hz mpv refresh. Wake the player only
-                    // on a confirmed L scanout, never on an R flip. The
-                    // independent KMS worker still processes ALL 120Hz
-                    // physical events and is never paced by the VO.
+                    // Physical KMS scanout remains independent at 120Hz.
+                    // The VO advances once per full L/R cycle. By default
+                    // pace it on L, but allow an opt-in R-edge experiment to
+                    // shift the producer phase without changing eye parity.
                     if (!drm->opts || !drm->opts->stereo_3d ||
-                        drm->stereo_flip_eye == 0) {
+                        drm->stereo_flip_eye ==
+                            drm->opts->stereo_pacing_eye) {
                         s->confirmed_flips = drm->stereo_flips;
                         pthread_cond_broadcast(&s->flip_ready);
                     }
