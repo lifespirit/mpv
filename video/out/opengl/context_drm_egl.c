@@ -639,6 +639,27 @@ static void stereo_note_unpresented_pair(struct ra_ctx *ctx,
     struct vo_drm_state *drm = ctx->vo->drm;
     const struct stereo_pair *pair = &s->pending;
     uint64_t count = ++drm->stereo_pair_unpresented_discards;
+
+    // Inexpensive counters for both normal/quiet modes: no fence polls,
+    // allocations, printing, or other blocking operations. Capture the
+    // readiness-history bucket and age before the pending pair is freed.
+    if (strcmp(reason, "newer_generation") == 0)
+        drm->stereo_pair_drop_newer++;
+    else if (strcmp(reason, "gbm_pressure") == 0)
+        drm->stereo_pair_drop_gbm_pressure++;
+    drm->stereo_pair_drop_deferrals[MPMIN(pair->fence_deferrals, 3u)]++;
+    if (pair->ready_ns > 0) {
+        int64_t age_ns = mp_time_ns() - pair->ready_ns;
+        if (age_ns >= 0) {
+            drm->stereo_pair_drop_age_sum_ns += age_ns;
+            if (!drm->stereo_pair_drop_age_samples ||
+                age_ns < drm->stereo_pair_drop_age_min_ns)
+                drm->stereo_pair_drop_age_min_ns = age_ns;
+            drm->stereo_pair_drop_age_max_ns =
+                MPMAX(drm->stereo_pair_drop_age_max_ns, age_ns);
+            drm->stereo_pair_drop_age_samples++;
+        }
+    }
     // This function runs on the producer while stereo.mutex is held.
     // Writing a logfile here can starve the 120Hz SCHED_FIFO KMS worker.
     // In quiet mode keep the exact discard count (and later frame_id_gaps)
@@ -1394,6 +1415,26 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
                     (unsigned long long)drm->stereo_commit_errors);
 
             if (drm->stereo_pair_mode) {
+                double drop_age_avg_ms = drm->stereo_pair_drop_age_samples
+                    ? drm->stereo_pair_drop_age_sum_ns /
+                      (1000000.0 * drm->stereo_pair_drop_age_samples) : 0.0;
+                MP_INFO(ctx, "Stereo DRM drops final: "
+                        "newer_generation=%llu gbm_pressure=%llu "
+                        "deferrals_0=%llu deferrals_1=%llu "
+                        "deferrals_2=%llu deferrals_3plus=%llu "
+                        "age_samples=%llu age_min_ms=%.3f "
+                        "age_avg_ms=%.3f age_max_ms=%.3f\n",
+                        (unsigned long long)drm->stereo_pair_drop_newer,
+                        (unsigned long long)drm->stereo_pair_drop_gbm_pressure,
+                        (unsigned long long)drm->stereo_pair_drop_deferrals[0],
+                        (unsigned long long)drm->stereo_pair_drop_deferrals[1],
+                        (unsigned long long)drm->stereo_pair_drop_deferrals[2],
+                        (unsigned long long)drm->stereo_pair_drop_deferrals[3],
+                        (unsigned long long)drm->stereo_pair_drop_age_samples,
+                        drm->stereo_pair_drop_age_min_ns / 1000000.0,
+                        drop_age_avg_ms,
+                        drm->stereo_pair_drop_age_max_ns / 1000000.0);
+
                 // Observations are recorded only on DRM's confirmed first
                 // L flip, never on producer publication or atomic submit.
                 // Relative drift is between different clock timelines, and
