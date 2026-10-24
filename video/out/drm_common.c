@@ -998,7 +998,12 @@ static drmModeConnector *get_first_connected_connector(const drmModeRes *res,
 static void restore_sdr(struct vo_drm_state *drm)
 {
     struct drm_atomic_context *atomic_ctx = drm->atomic_context;
-    if (!atomic_ctx)
+    // The stereo EGL uninit path releases the CRTC and restores the saved
+    // atomic state before destroying its GBM front buffers. Do not submit
+    // an additional SDR request after that release (or after VT switch):
+    // this DRM FD may no longer be master, and its generic request may
+    // never have been allocated if playback stopped before the first flip.
+    if (!drm->active || !atomic_ctx)
         return;
 
     struct pl_color_space sdr = pl_color_space_srgb;
