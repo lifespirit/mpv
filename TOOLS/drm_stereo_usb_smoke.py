@@ -13,7 +13,7 @@ import time
 def counters(line):
     return {
         key: (float(value) if "." in value else int(value))
-        for key, value in re.findall(r"([a-z][a-z0-9_]*)=(-?\\d+(?:\\.\\d+)?)", line)
+        for key, value in re.findall(r"([a-z][a-z0-9_]*)=(-?\d+(?:\.\d+)?)", line)
     }
 
 
@@ -95,9 +95,9 @@ def main():
         print("ERROR: could not launch mpv:", exc)
 
     content = log_path.read_text(errors="replace") if log_path.exists() else ""
-    usb = re.findall(r"Stereo USB final:[^\\n]*", content)
-    kms = re.findall(r"Stereo DRM final:[^\\n]*", content)
-    policy = re.findall(r"Stereo scheduling policy:[^\\n]*", content)
+    usb = re.findall(r"Stereo USB final:[^\n]*", content)
+    kms = re.findall(r"Stereo DRM final:[^\n]*", content)
+    policy = re.findall(r"Stereo scheduling policy:[^\n]*", content)
     usb_values = counters(usb[-1]) if usb else {}
     kms_values = counters(kms[-1]) if kms else {}
     policy_values = counters(policy[-1]) if policy else {}
@@ -143,7 +143,7 @@ def main():
         "pass": not errors,
         "optical_phase_verified": False,
     }
-    summary_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\\n")
+    summary_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     print("Summary:", summary_path)
     print("KMS flips:", kms_values.get("flips"), "USB confirmed:",
           usb_values.get("confirmed"), "sent:", usb_values.get("sent"))
