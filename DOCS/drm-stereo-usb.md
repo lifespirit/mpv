@@ -727,103 +727,117 @@ Do not claim an optical PASS, change KMS
 pacing, or apply arbitrary per-run compensation
 without lens/screen photodiode timing.
 
+## Live manual USB shutter timer calibration (opt-in)
 
-## Causal test: does one extra full L/R movie hold improve optical phase?
+The abandoned one-shot movie-frame hold injection from commit
+`7488c53` has been reverted in a new commit, *without rewriting branch
+history*. A second near-correct optical result at 3500us had a 100%
+exact movie plan, proving an extra 2->3 film-frame hold is not
+necessary for good optical output. The independent 120Hz KMS/USB
+pipeline remains unchanged.
 
-After four `NVSTUSB_EYE_TIMER_US=3500` optical runs, only run
-4 (subjectively closest to correct 3D) exhibited a one-cycle
-**movie-presentation** mismatch:
-`Stereo plan row: requested=2 actual_3=1` and
-`late_promotions=1`. The other three runs were
-`exact=477/477`; run 4 was `exact=476/477`.
-All four had `missed_vblanks=0`, `parity_errors=0`,
-`wrong_eye=0`, `skipped_msc=0`, and
-`confirmed=sent`. Run 4 had **no lost physical
-left/right flip and no lost USB shutter command**.
-Instead, a movie frame remained displayed for
-three complete L/R cycles instead of two
-(an extra 2 physical refreshes, ~16.67ms at
-120Hz). This is a *duration* error for one movie
-generation, not a 120Hz eye-parity error or a
-USB packet drop. In the four-run sample, the
-optical outcome and mismatch are correlated,
-but a direct causal mechanism has not been shown.
+**First safe adjustment mechanism:** on each future
+`nvstusb_send_eye` request, the library encodes a firmware timer
+parameter into the eye-selection packet. The calibration branch now
+exposes `nvstusb_set_eye_timer_us(ctx, timer_us)` for runtime changes
+on the **same USB owner thread**. Its supported 120Hz range is
+500..7833us (exact maximum follows the physical refresh rate).
+It does not re-upload firmware, re-enumerate the emitter,
+alter the DRM physical flip timing or change the eye polarity.
+The exact firmware IR/optical phase relationship is still unknown:
+adjusting this number is an experiment, not proven synchronisation.
 
-To separate accidental startup/optical phase variation
-from an actual response to a repeated movie pair,
-the optional **`MPV_DRM_STEREO_TEST_EXTRA_HOLD_GEN`**
-environment variable intentionally postpones exactly
-one *eligible* generation promotion by a full L/R
-cycle. It is accepted only for native stereo with
-`PLAN_HOLD=1`; allowed generation 2..100000.
-If unset, no scheduling behavior changes.
-The 120Hz KMS worker still flips L,R,L,R and
-the USB bridge still emits one command on every
-confirmed physical flip. A test therefore
-reproduces one `requested=2,actual=3`-style
-presentation error **without** suppressing a
-physical KMS flip or resetting the USB firmware.
-
-Build the updated mpv repository and use a
-verified libnvstusb calibration .so (see preceding
-section). On a known, directly connected IR
-emitter, keep the same 3500us requested timer,
-same calibration clip, same display mode and
-same eye inversion for every launch.
-Use 4 paired runs: baseline, injection, baseline,
-injection, optionally test a later generation
-120 (~5 seconds). For example:
-
-```sh
-# Use the same command as the optical fixture run.
-NVSTUSB_EYE_TIMER_US=3500 \
-MPV_DRM_STEREO_TEST_EXTRA_HOLD_GEN=10 \
-MPV_DRM_STEREO_USB=1 \
-MPV_DRM_STEREO_USB_LIBRARY=/absolute/path/to/libnvstusb/src/.libs/libnvstusb.so \
-MPV_DRM_STEREO_USB_FIRMWARE=/absolute/path/to/libnvstusb/nvstusb.fw \
-  ./build/mpv --no-config --vo=gpu --gpu-context=drm \
-    --drm-connector=DP-1 --drm-mode=2560x1440@120 \
-    --drm-stereo-3d=yes --drm-vrr-enabled=no \
-    --video-sync=display-resample --no-audio --no-sub \
-    --log-file=/tmp/mpv-extra-lr-hold-gen10.log \
-    /tmp/drm-optical-sbs.mkv
-```
-
-Expected summary for injection, if the selected
-pending pair was ready at the due boundary:
+In mpv, set `MPV_DRM_STEREO_USB_CONTROL=1` **in addition to**
+`MPV_DRM_STEREO_USB=1`. The separate USB sender creates a private
+0600 FIFO in the user's `XDG_RUNTIME_DIR`:
 
 ```text
-Stereo DIAGNOSTIC extra hold final: target_generation=10 injected=1 ...
-Stereo plan ... mismatched>=1 ...
-Stereo plan row: requested=2 ... actual_3=1 ...
-Stereo USB final: ... confirmed=<N> sent=<N> skipped_msc=0 ...
+$XDG_RUNTIME_DIR/mpv-stereo-usb-<mpv-pid>.fifo
 ```
 
-An injected hold for a generation whose planned
-duration was 3 will instead produce a 3->4
-interval. Check the *actual* plan row in every
-test. If `injected=0`, this specific run did
-not test the hypothesis; do not treat it as
-an injection success. The experiment is a
-video-timing perturbation, so it intentionally
-worsens the plan's exact-match statistics.
+Control mode requires a private runtime directory owned by the current
+UID and a rebuilt `libnvstusb` exporting both
+`nvstusb_effective_eye_timer_us` and
+`nvstusb_set_eye_timer_us`. Failure to initialize the command
+channel or load these APIs aborts the requested live test at VO
+initialization, before starting KMS. Control is **off by default**:
+without it, no FIFO, extra poll workload, or runtime timer mutation
+is introduced.
 
-Record the optical boundary position at the
-START and END of each run through a camera or
-photodiodes, including whether it moves over
-time. If a targeted extra full L/R cycle
-improves optical results **consistently** across
-independent randomized runs, it suggests an
-indirect influence worth instrumenting further.
-If not, focus on emitter/receiver acquisition
-phase. A full pair consists of one LEFT and
-one RIGHT flip, so it does not by itself
-change left/right parity or the within-8.33ms
-offset between each KMS callback and the
-corresponding USB command. It also cannot
-retroactively change the *first* USB command
-if injected at generation 10 or 120.
+From the mpv checkout (with the library built separately):
 
-This test is explicitly opt-in and must
-never become default movie playback behavior
-without a demonstrated optical mechanism.
+```sh
+MPV_DRM_STEREO_USB=1 \
+MPV_DRM_STEREO_USB_CONTROL=1 \
+NVSTUSB_EYE_TIMER_US=3500 \
+MPV_DRM_STEREO_USB_LIBRARY=/absolute/path/to/libnvstusb/src/.libs/libnvstusb.so \
+MPV_DRM_STEREO_USB_FIRMWARE=/absolute/path/to/libnvstusb/nvstusb.fw \
+./build/mpv --no-config --vo=gpu --gpu-context=drm \
+  --drm-connector=DP-1 --drm-mode=2560x1440@120 \
+  --drm-stereo-3d=yes --drm-vrr-enabled=no \
+  --video-sync=display-resample --no-audio --no-sub \
+  --loop-file=inf \
+  --input-conf=TOOLS/drm-stereo-usb-input.conf \
+  --log-file=/tmp/mpv-optical-live-calibration.log \
+  /tmp/drm-optical-sbs.mkv
+```
+
+**Keyboard controls** in this optional input configuration,
+with mpv launched from the checkout's root:
+
+| Key | Action |
+| --- | --- |
+| Alt+Left | Decrease firmware timer by 100us |
+| Alt+Right | Increase firmware timer by 100us |
+| Alt+Down | Decrease by 25us |
+| Alt+Up | Increase by 25us |
+| Alt+0 | Print current effective setting in mpv log |
+
+The same commands can be issued from a second terminal:
+
+```sh
+MPV_PID=$(pgrep -n -x mpv)
+python3 TOOLS/drm_stereo_usb_phase_ctl.py "$MPV_PID" get
+python3 TOOLS/drm_stereo_usb_phase_ctl.py "$MPV_PID" +100
+python3 TOOLS/drm_stereo_usb_phase_ctl.py "$MPV_PID" -- -25
+python3 TOOLS/drm_stereo_usb_phase_ctl.py "$MPV_PID" set:3500
+grep 'Stereo USB phase control:' /tmp/mpv-optical-live-calibration.log
+```
+
+The helper merely writes one atomic command to the FIFO;
+**its success means command delivery, NOT application**. Confirm
+the effective setting via the timestamped mpv log:
+
+```text
+Stereo USB phase control: eye_timer_us=3600 previous=3500 updates=1 optical_verified=0
+```
+
+On clean shutdown the FIFO is removed. On crash, stale FIFOs
+may remain; remove the specific stale path only after confirming
+the original mpv process is gone. No arbitrary existing paths
+are unlinked at startup.
+
+### Manual optical experiment
+
+Use the constant left-white/right-black, swapped, both-white
+and both-black pattern. Change in small increments, **without
+restarting playback**, and record whether the horizontal
+contamination boundary moves instantly, gradually, or not at
+all. For each step record timer value, approximate band
+height, which lens, and the physical time after adjustment.
+A photodiode or high-speed recording through each lens
+is preferable to wearing the glasses during calibration.
+
+If changing this timer controls the optical phase reproducibly,
+we can make a persistent per-monitor setting, plus optional
+in-play tuning, and assess automatic feedback with sensors.
+If it only changes IR duty or has no reliable effect,
+the next engineering option is a **separate, nonblocking,
+MSC-anchored predicted-next-vblank USB sender** with
+independent timing offset. We should never shift/delay
+the 120Hz video KMS worker to compensate for unknown
+USB firmware or LCD transmission. A truly automatic
+closed loop requires optical feedback from a sensor or
+documented emitter/receiver phase feedback; current
+KMS and USB success counters alone cannot measure
+lens opening or eliminate cross-talk.

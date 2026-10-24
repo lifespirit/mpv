@@ -715,6 +715,13 @@ Available video output drivers are:
         to 100..10000 to adjust). USB init failure prevents stereo
         VO startup rather than silently running without shutters.
         The KMS realtime worker is never blocked by USB operations.
+        ``MPV_DRM_STEREO_USB_CONTROL=1`` enables an optional
+        private FIFO for adjusting the libnvstusb eye-command timer at
+        runtime (without changing KMS/MSC scheduling). This requires
+        the calibration build of libnvstusb and ``XDG_RUNTIME_DIR``.
+        Use ``TOOLS/drm-stereo-usb-input.conf`` for optional keyboard
+        controls. Adjustment is experimental, not verified optical
+        phase locking. See ``DOCS/drm-stereo-usb.md``.
         ``MPV_DRM_STEREO_USB_INVERT_EYES=1`` reverses the USB eye
         assignment. This is NOT calibrated optical shutter synchronization:
         USB commands are emitted after physical flip confirmation, and
