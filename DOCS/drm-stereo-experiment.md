@@ -4150,3 +4150,23 @@ owns it.
 Do not enable both experiments simultaneously for first A/B; isolate
 render wake phase and candidate retention effects. Neither changes
 physical KMS 120Hz or stereo eye parity.
+
+
+
+### Correction of kernel GPU probe clock (after four 120-second runs)
+
+The original GPU probe kernel values were systematically wrong:
+`fence_kernel_L_age_ms` was around +1215ms and
+`fence_kernel_R_age_ms` around +1223ms; the matching
+`fence_observed_*` measurements were ~8ms/~16ms.
+This discrepancy was caused by converting Linux dma_fence
+CLOCK_MONOTONIC timestamps with mpv's raw-time startup
+offset, despite mpv selecting CLOCK_MONOTONIC_RAW on Linux.
+
+The corrected converter takes paired CLOCK_MONOTONIC and
+`mp_time_ns()` samples, maps each reported kernel fence timestamp
+to mpv's CPU timebase and **then** subtracts the pair-published
+timestamp. The R-minus-L fence completion delta in the old
+logs was unaffected by this constant clock-epoch mismatch,
+but absolute kernel ages MUST be remeasured with the fixed code.
+This fix changes diagnostics only.

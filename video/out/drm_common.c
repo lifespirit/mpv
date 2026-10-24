@@ -253,9 +253,25 @@ static void stereo_async_print_gpu_probe(struct vo_drm_state *drm,
                             if (fences[n].status == 1 &&
                                 fences[n].timestamp_ns > latest_ns)
                                 latest_ns = fences[n].timestamp_ns;
-                        if (latest_ns)
-                            kernel_ns[eye] =
-                                mp_time_ns_from_raw_time(latest_ns);
+                        if (latest_ns) {
+                            // dma_fence timestamps use CLOCK_MONOTONIC,
+                            // whereas mpv prefers CLOCK_MONOTONIC_RAW.
+                            // Subtracting mpv's RAW startup offset from
+                            // a MONOTONIC timestamp introduces seconds of
+                            // error on hosts disciplined by NTP. Bridge
+                            // both time bases using a near-simultaneous
+                            // sample and only then subtract ready_ns.
+                            struct timespec mono = {0};
+                            if (!clock_gettime(CLOCK_MONOTONIC, &mono)) {
+                                int64_t mp_now_ns = mp_time_ns();
+                                int64_t mono_now_ns =
+                                    (int64_t)mono.tv_sec * 1000000000LL +
+                                    mono.tv_nsec;
+                                kernel_ns[eye] =
+                                    (int64_t)latest_ns - mono_now_ns +
+                                    mp_now_ns;
+                            }
+                        }
                     }
                 }
 #endif
