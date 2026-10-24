@@ -282,7 +282,17 @@ static void stereo_async_print_gpu_probe(struct vo_drm_state *drm,
     // Close even on timeout/error, exactly once, never the KMS-owned fd.
     close(sample->fence_fd[0]);
     close(sample->fence_fd[1]);
+    double gpu_after_failed_L_ms = -1.0;
+    if (sample->dropped_pending && sample->last_l_deferral_age_ns > 0 &&
+        kernel_ns[1]) {
+        gpu_after_failed_L_ms =
+            ((kernel_ns[1] - sample->pair_published_ns) -
+             sample->last_l_deferral_age_ns) / 1000000.0;
+    }
     MP_INFO(drm, "Stereo GPU probe: generation=%llu frame_id=%llu "
+            "kind=%s last_failed_L_target_msc=%u "
+            "last_failed_L_age_ms=%.3f "
+            "gpu_R_after_failed_L_ms=%.3f "
             "cpu_render_L_ms=%.3f cpu_render_R_ms=%.3f "
             "egl_swap_L_ms=%.3f egl_swap_R_ms=%.3f "
             "fence_export_L_ms=%.3f fence_export_R_ms=%.3f "
@@ -292,6 +302,11 @@ static void stereo_async_print_gpu_probe(struct vo_drm_state *drm,
             "-1 means unavailable)\n",
             (unsigned long long)sample->generation,
             (unsigned long long)sample->frame_id,
+            sample->dropped_pending ? "discard" : "sample",
+            sample->last_l_deferral_target_msc,
+            sample->last_l_deferral_age_ns > 0
+                ? sample->last_l_deferral_age_ns / 1000000.0 : -1.0,
+            gpu_after_failed_L_ms,
             sample->render_ns[0] / 1000000.0,
             sample->render_ns[1] / 1000000.0,
             sample->egl_swap_ns[0] / 1000000.0,

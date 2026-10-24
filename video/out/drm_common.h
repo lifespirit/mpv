@@ -164,6 +164,9 @@ struct drm_stereo_gpu_probe {
     int64_t render_ns[2];
     int64_t egl_swap_ns[2];
     int64_t fence_export_ns[2];
+    bool dropped_pending; // diagnostic category, not a KMS decision
+    int64_t last_l_deferral_age_ns; // CPU monotonic age at final failed L
+    uint32_t last_l_deferral_target_msc;
 };
 
 struct drm_stereo_async_drop {

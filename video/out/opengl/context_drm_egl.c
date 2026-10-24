@@ -719,6 +719,29 @@ static void stereo_note_unpresented_pair(struct ra_ctx *ctx,
         .r_probe_right = pair->intermediate_r_probe_age_ns > 0
             ? pair->intermediate_r_fence_R : -1,
     });
+    // Probe every *actual* lost candidate (first 40, then 1/100).
+    // The normal-priority async logger duplicates these sync_file FDs
+    // before the producer releases the pair; it obtains the historical
+    // GPU timestamps even when the fences are ALREADY signaled.
+    // Compare right fence signal time to the last failed left-boundary
+    // decision; the two ages use the same mpv monotonic timebase.
+    // The RT worker never calls ioctl, EGL, blocks, or logs.
+    if (s->native_fence && pair->fence_fd[0] > 0 &&
+        pair->fence_fd[1] > 0) {
+        vo_drm_stereo_log_gpu_probe(drm, &(struct drm_stereo_gpu_probe) {
+            .dropped_pending = true,
+            .generation = pair->generation,
+            .frame_id = pair->frame_id,
+            .fence_fd = {pair->fence_fd[0], pair->fence_fd[1]},
+            .pair_published_ns = pair->ready_ns,
+            .render_ns = {pair->render_ns[0], pair->render_ns[1]},
+            .egl_swap_ns = {pair->egl_swap_ns[0], pair->egl_swap_ns[1]},
+            .fence_export_ns = {pair->fence_export_ns[0],
+                                pair->fence_export_ns[1]},
+            .last_l_deferral_age_ns = pair->last_fence_deferral_age_ns,
+            .last_l_deferral_target_msc = pair->last_fence_deferral_msc,
+        });
+    }
 }
 
 // Zero-timeout poll of both eyes on the RT worker. No EGL/GL operations
@@ -1286,10 +1309,17 @@ bool vo_drm_stereo_pair_begin_eye(struct ra_ctx *ctx, int eye)
             return false;
         }
         s->right_swap_interval_configured = true;
-        MP_INFO(ctx, "Stereo right EGLSurface swap interval 0 applied; "
-                "EGLConfig min=%d max=%d (actual interval may be clamped)\n",
-                min_known ? min_interval : -1,
-                max_known ? max_interval : -1);
+        if (min_known && min_interval > 0) {
+            MP_WARN(ctx, "Stereo right eglSwapInterval(0) accepted but "
+                    "CLAMPED by EGLConfig min=%d max=%d; "
+                    "not an effective zero-interval test\n",
+                    min_interval, max_known ? max_interval : -1);
+        } else {
+            MP_INFO(ctx, "Stereo right EGLSurface swap interval 0 requested; "
+                    "EGLConfig min=%d max=%d\n",
+                    min_known ? min_interval : -1,
+                    max_known ? max_interval : -1);
+        }
     }
     s->capture_eye = eye;
     return true;

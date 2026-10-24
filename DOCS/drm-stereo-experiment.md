@@ -4286,3 +4286,53 @@ and ensure `missed_vblanks`/parity/commit errors remain zero.
 Do not simultaneously enable `PLAN_HOLD`, `RENDER_WAKE_EYE`, or
 `KEEP_READY_PENDING`: their effects must remain independently
 identifiable.
+
+
+
+### Right swap-interval experiment result and event-focused GPU probes
+
+Test: `mpv-stereo-right-swap0.log` (Oct 24, 2026),
+build `v0.41.0-dev-g06b04c3cb`, 120s, only
+`MPV_DRM_STEREO_RIGHT_SWAP_INTERVAL_ZERO=1`.
+
+The EGL call returned success but EGLConfig reported
+`EGL_MIN_SWAP_INTERVAL=1` and `EGL_MAX_SWAP_INTERVAL=1`.
+By the EGL API contract, 0 is silently clamped to the allowed range;
+the new call could not actually set interval 0. More importantly,
+Mesa's DRM/GBM swap implementation
+(`src/egl/drivers/dri2/platform_drm.c`, `dri2_drm_swap_buffers`)
+does not queue a vblank wait for the surface; an EGLConfig minimum of
+1 does **not** establish that vblank throttling caused the observed
+GPU delta.
+
+Mean native kernel fence signal age in clockfix baseline vs swap0:
+L=7.939 vs 7.865ms, R=15.739 vs 15.523ms,
+R-L=7.800 vs 7.658ms; identical R median 15.183ms.
+Physical KMS misses/parity/commit errors remained zero. Movie
+`frame_id_gaps` 22 vs 18, `fence_deferrals` 1335 vs 1491,
+exact planned holds 1528/2832 vs 1511/2839. This is not evidence of
+a GPU-latency improvement from the swap-interval change.
+Recast the swap-interval knob as diagnostic only; when min>0 it now
+prints an explicit clamping warning.
+
+To pinpoint the real cause of candidate loss, each logged
+`Stereo unpresented pair discarded` with native fences now ALSO
+enqueues a nonblocking `Stereo GPU probe` (`kind=discard`) for
+the exact pending generation being discarded. The async logger uses
+duplicate sync_file FDs to retrieve historical signal timestamps,
+including fences signaled long before the producer dropped the pair.
+`last_failed_L_age_ms` captures that pair's KMS age at its last
+unsuccessful L-boundary check; `gpu_R_after_failed_L_ms` computes the
+right fence signal's offset from that *CPU check* in the same mpv
+timebase. Positive means the right GPU fence signaled too late for
+the last left decision; negative means it was already signaled, in
+which case the other eye, an error, or a race must be examined.
+This is an observable signal-vs-check comparison, NOT proof of a
+possible earlier scanout: committing FB_ID also requires a future
+L boundary and correct BO ownership.
+
+The diagnostic stays OFF with `--drm-stereo-stats=no`.
+No GPU waits, ioctls or allocations were added to SCHED_FIFO KMS.
+The existing bounded asynchronous logger may drop diagnostic events
+under load, so always check its loss count and avoid interpreting
+missing events as missing movie frames.
