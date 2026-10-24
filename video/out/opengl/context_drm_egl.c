@@ -2127,7 +2127,9 @@ static void stereo_usb_confirm_flip(void *opaque, int eye, uint32_t msc,
 
     // seq is even while the payload is complete; odd during an update.
     // This avoids pairing an eye from one MSC with a UST from another.
-    atomic_fetch_add_explicit(&u->mailbox_seq, 1, memory_order_relaxed);
+    // The first acq_rel RMW prevents publishing payload before marking
+    // the sequence odd; the final release RMW publishes both payload fields.
+    atomic_fetch_add_explicit(&u->mailbox_seq, 1, memory_order_acq_rel);
     atomic_store_explicit(&u->mailbox_ust_us, ust_us, memory_order_relaxed);
     atomic_store_explicit(&u->mailbox_event,
                           (((uint64_t)msc << 1) | (unsigned)(eye & 1)) + 1,
@@ -2228,7 +2230,7 @@ static void *stereo_usb_sender_thread(void *opaque)
             break;
 
         // Read a consistent snapshot from the single KMS callback writer.
-        uint64_t word = 0, ust_us = 0, seq1, seq2;
+        uint64_t word = 0, ust_us = 0, seq1 = 0, seq2 = 0;
         do {
             seq1 = atomic_load_explicit(&u->mailbox_seq, memory_order_acquire);
             if (seq1 & 1)
