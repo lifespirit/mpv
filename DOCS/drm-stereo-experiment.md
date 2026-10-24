@@ -5240,3 +5240,66 @@ separate genuine SDR restore failures from failed
 old-mode restoration. Compare the new restore
 warning and DRM master/VT handling before altering
 the old CRTC state restoration sequence.
+
+
+### First 2-cycle and 25-cycle EOF/idle soak attempts aborted by harness race
+
+Attached artifacts: `mpv-stereo-eof-idle-cycles-20261024-235606-342765.{log,jsonl,csv}`
+(requested 2 cycles) and
+`mpv-stereo-eof-idle-cycles-20261024-235616-342856.{log,jsonl,csv}`
+(requested 25 cycles). Both used binary `v0.41.0-dev-gbbcb04a9c`
+(including the first SDR commit guard) and aborted
+**before the first playback**, at 0.305s / 0.302s.
+Each `loadfile replace` returned `success`, mpv
+emitted `start-file` and `file-loaded`, and
+`time-pos` returned 295.0. The harness then queried
+`core-idle` ONCE, receiving `true`, and raised
+`cycle 1: still idle after file-loaded`.
+In mpv this is normal: `file-loaded` may precede
+the first decoder/VO playback transition, especially
+with `--idle=yes` and an implicit initial `--start`
+seek. Both scripted runs sent `quit` with return code
+0, 0 EOFs, no physical KMS flips, zero completed
+cycles, and CSV containing headers but **no data rows**.
+These runs provide NO soak-test or memory-leak result.
+
+Additional diagnostic discovered by these early shutdowns:
+the original generic DRM SDR EINVAL diagnostic no longer
+appears, but the new warning
+`Cannot restore SDR colorspace: no atomic request`
+does appear once per run. Source-order review explains
+the warning: the stereo EGL context already invokes
+`vo_drm_release_crtc` before generic `vo_drm_uninit`;
+a very early shutdown can leave `atomic_ctx->request`
+unallocated, and generic `restore_sdr` then tries
+to change SDR color state even though the saved CRTC
+has ALREADY been restored / DRM active flag is false.
+This is a redundant teardown operation, not evidence
+of a live KMS pageflip failure.
+
+**Follow-up commit `6c30ded`:** `restore_sdr()`
+now returns early if `!drm->active`, before touching
+color state or submitting another atomic request.
+The first guard against an unnecessary SDR commit and
+correct use of `errno` remain. Non-stereo active-CRTC
+HDR->SDR restoration remains in place. Target i915
+runtime confirmation remains pending.
+
+**Corrected standalone Python harness**
+`mpv_stereo_eof_idle_cycles.py`: replace the immediate
+`if ipc.get("core-idle") is True: raise RuntimeError`
+after `file-loaded` with a bounded
+`wait_property(..., "core-idle", lambda x: x is False,
+timeout=30)`. Also treat
+`Cannot restore SDR colorspace` as a restore error.
+The revised script passed a two-cycle fake-IPC
+integration test with a deliberately delayed
+`core-idle=false` transition (500ms after
+`file-loaded`); this is a mock validation only.
+
+Repeat `git pull --ff-only && meson compile -C build`,
+**replace the old local script with the corrected
+download**, first run `--cycles 2`, then `--cycles 25`.
+Only then interpret the 25-row CSV idle RSS and
+FD trends, final KMS summaries, and whether
+`restore_sdr` teardown warnings really disappeared.
