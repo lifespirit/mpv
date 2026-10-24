@@ -123,6 +123,8 @@ struct stereo_kms {
     bool two_slot_queue; // Experimental bounded two-entry FIFO.
     uint64_t queue_second_enqueues, queue_second_promotions;
     uint64_t queue_full_skips, queue_gbm_skips, queue_unexpected_incoming;
+    uint64_t queue_seek_resets, queue_seek_pending_flushes;
+    uint64_t queue_seek_queued_flushes, queue_seek_building_flushes;
     // One-shot, explicit stress-test-only KMS promotion gate. It never
     // stops physical L/R flips: only holds pending while both slots are
     // occupied, giving the IPC test time to issue a seek.
@@ -1232,6 +1234,49 @@ void vo_drm_stereo_pair_wait_vsync(struct ra_ctx *ctx)
     pthread_mutex_unlock(&s->mutex);
 }
 
+// Invoked by mpv on the producer/VO thread when its video queue is reset
+// after seek (and on startup/reconfiguration). Both unpublished slots must
+// be flushed before the KMS worker can consider another L promotion.
+// Do not touch active or in-flight scanout BOs. GBM release must run
+// outside stereo.mutex so the 120Hz worker cannot be delayed by Mesa.
+void vo_drm_stereo_pair_reset(struct ra_ctx *ctx)
+{
+    struct priv *p = ctx->priv;
+    struct stereo_kms *s = &p->stereo;
+    if (!s->enabled || !s->initialized)
+        return;
+
+    struct stereo_pair pending = {0}, queued = {0}, building = {0};
+    pthread_mutex_lock(&s->mutex);
+    s->queue_seek_resets++;
+    pending = s->pending;
+    queued = s->queued;
+    building = s->building;
+    s->pending = (struct stereo_pair){0};
+    s->queued = (struct stereo_pair){0};
+    s->building = (struct stereo_pair){0};
+    // The optional occupied-FIFO test must not stall the next movie
+    // generation after a seek. Keep queue_test_triggered one-shot.
+    s->queue_test_hold_until_ns = 0;
+    s->queue_seek_pending_flushes += !!pending.bo[0];
+    s->queue_seek_queued_flushes += !!queued.bo[0];
+    s->queue_seek_building_flushes += !!building.bo[0];
+    pthread_mutex_unlock(&s->mutex);
+
+    if (pending.bo[0] || queued.bo[0] || building.bo[0])
+        MP_INFO(ctx, "Stereo queue seek reset: pending_frame_id=%llu "
+                "queued_frame_id=%llu building_frame_id=%llu "
+                "(active and in-flight scanout preserved)\n",
+                (unsigned long long)pending.frame_id,
+                (unsigned long long)queued.frame_id,
+                (unsigned long long)building.frame_id);
+
+    stereo_release_pair(p, &pending);
+    stereo_release_pair(p, &queued);
+    stereo_release_pair(p, &building);
+    stereo_drain_retired(ctx);
+}
+
 // These helpers are only invoked on the original VO/EGL thread.
 bool vo_drm_stereo_pair_can_capture(struct ra_ctx *ctx)
 {
@@ -1697,6 +1742,13 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
                         (unsigned long long)s->queue_gbm_skips,
                         (unsigned long long)s->queue_unexpected_incoming,
                         s->pending.bo[0] != NULL, s->queued.bo[0] != NULL);
+                MP_INFO(ctx, "Stereo queue seek reset final: "
+                        "resets=%llu pending_flushes=%llu "
+                        "queued_flushes=%llu building_flushes=%llu\n",
+                        (unsigned long long)s->queue_seek_resets,
+                        (unsigned long long)s->queue_seek_pending_flushes,
+                        (unsigned long long)s->queue_seek_queued_flushes,
+                        (unsigned long long)s->queue_seek_building_flushes);
                 MP_INFO(ctx, "Stereo queue test final: hold_ms=%d "
                         "triggered=%d hold_blocks=%llu\n",
                         s->queue_test_hold_ms, s->queue_test_triggered,

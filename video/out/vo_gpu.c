@@ -341,6 +341,13 @@ static int control(struct vo *vo, uint32_t request, void *data)
     }
     case VOCTRL_RESET:
         gl_video_reset(p->renderer);
+#if HAVE_DRM
+        if (p->stereo_pair) {
+            vo_drm_stereo_pair_reset(p->ctx);
+            p->stereo_pair_valid = false;
+            p->stereo_pair_last_frame_id = 0;
+        }
+#endif
         return true;
     case VOCTRL_PAUSE:
         if (gl_video_showing_interpolated_frame(p->renderer))

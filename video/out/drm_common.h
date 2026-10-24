@@ -424,6 +424,9 @@ bool vo_drm_stereo_pair_begin_eye(struct ra_ctx *ctx, int eye);
 void vo_drm_stereo_pair_note_eye_render(struct ra_ctx *ctx, int eye,
                                          int64_t render_ns);
 bool vo_drm_stereo_pair_can_capture(struct ra_ctx *ctx);
+// VOCTRL_RESET from mpv's video seek/reconfigure path: detach unpublished
+// stereo generations while keeping the active/in-flight KMS BOs alive.
+void vo_drm_stereo_pair_reset(struct ra_ctx *ctx);
 void vo_drm_stereo_pair_set_frame_info(struct ra_ctx *ctx,
                                        uint64_t frame_id, double media_pts,
                                        bool pts_valid, int planned_vsyncs,
