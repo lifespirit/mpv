@@ -4801,3 +4801,89 @@ boundaries. This targeted test is not yet validation that all
 seek paths always flush stale pending BOs; if it reveals such a
 race, fix producer seek/reset handling while retaining KMS
 framebuffer lifetime safety.
+
+
+### Forced occupied-queue seek exposed real stale movie frames (2026-10-24)
+
+Repro logs: `mpv-stereo-ipc-stress-20261024-230948-334210.log`
+and `.jsonl`, build `df0c700c`, `QUEUE2=1 PLAN_HOLD=1
+QUEUE_TEST_HOLD_MS=750`. At mpv time 2.112s the producer logged
+`Stereo queue test occupied: pending_frame_id=69
+queued_frame_id=70 hold_ms=750`. JSON IPC issued
+`seek 900 absolute+exact` at 2.118s, with mpv reporting
+`playback restart complete @900.024000` at 2.149s.
+Yet the confirmed-L PTS trace reports generation 35
+frame_id=69 movie_pts=296.463 at MSC 6178296, followed by
+generation 37 frame_id=99 movie_pts=900.733 at MSC 6178306.
+Mapping physical MSC to the report at 1.511s for MSC 6178131
+puts frame 69's *first physical L scanout* at ~2.886s:
+approximately 0.768s after the seek command and
+0.737s after playback restart. The intervening gen 36
+is not in the bounded sample trace and should not be
+asserted as a particular frame without further telemetry.
+
+This is a **real seek correctness failure**: the old
+unpublished pre-seek FIFO outlived the decoder seek and
+was promoted at the end of the forced 750ms gate.
+An mpv IPC seek being accepted or playback-restart
+emitted does NOT mean stale GBM pending/queued BOs were
+flushed. All L/R KMS counters were nevertheless error-free:
+flips=2659, missed_vblanks=0, wrong_eye=0,
+pair_unpresented_discards=0 and in-play commit_errors=0.
+The intentionally full queue recorded 46 full_skips and
+45 gate hold_blocks; queue drained afterwards.
+The new long-gap PTS diagnostic found exactly one
+0.800s reset and produced 495 exact / 500 comparable
+plans: raw test-induced mismatch is not a steady-state
+pacing regression. One source frame_id gap 37->39
+was during startup, before the deliberate seek.
+
+**Fix in commit `c3cf121`:** mpv's
+`reset_playback_state -> reset_video_state ->
+vo_seek_reset -> VOCTRL_RESET` sequence already
+delivers a seek/reconfigure reset to the VO thread.
+The stereo GPU VO previously called only
+`gl_video_reset`, leaving stereo `pending` and
+`queued` owned by the KMS worker.
+The new `vo_drm_stereo_pair_reset(ctx)` detaches
+`building`, `pending` and `queued` under the
+same mutex protecting KMS selection, cancels
+the test hold deadline (without rearming the one-shot),
+and releases the unpublished sync_file FDs + GBM BOs
+on the original VO/EGL thread *after unlocking*.
+`active` and any in-flight or retired KMS buffers
+remain untouched until their ordinary confirmed-flip
+lifetime transition, so eye pairing is preserved.
+VO resets the last-drawn-frame tracking as well.
+
+The fix adds a producer-thread event:
+`Stereo queue seek reset: pending_frame_id=...
+queued_frame_id=... building_frame_id=...`
+only when a nonempty unpublished state was flushed.
+Shutdown diagnostics gain `Stereo queue seek reset final:
+resets=... pending_flushes=... queued_flushes=...
+building_flushes=...`.
+
+**Immediate re-test:** `git pull --ff-only &&
+meson compile -C build` then run
+`mpv_stereo_ipc_stress.py --occupied-seek` with the
+existing 750ms test gate. Verify this time there
+is a producer-side queue-reset log reporting pending
+69 / queued 70 shortly after the IPC seek,
+with nonzero pending and queued flush counters
+and no reappearance of a confirmed-L movie PTS
+from the pre-seek segment after the flush.
+The KMS must continue 120Hz alternating L/R
+with zero missing vblanks. Previously the first
+post-seek confirmed L was old frame 69; after
+the fix the **next newly promoted** pair should
+belong to the new 900s segment, while displaying
+the last pre-seek active pair until then is
+expected/necessary for continuous shutter cadence.
+
+The fix is not yet built or tested on the target i915
+machine. Repeat ordinary pause/seek and steady-state
+test without `QUEUE_TEST_HOLD_MS` after targeted
+revalidation. Observe that intentional seek flush
+counters are not movie-frame loss due to poor GPU
+performance.
