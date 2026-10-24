@@ -129,9 +129,12 @@ struct stereo_usb {
     atomic_uint_fast64_t mailbox_event;
     atomic_uint_fast64_t mailbox_ust_us;
     atomic_uint_fast64_t confirmed;
+    atomic_uint_fast64_t first_confirmed_msc_plus_one;
     atomic_uint_fast64_t wake_errors;
     // The sender alone updates these; read after pthread_join only.
-    uint64_t sent, skipped, late_2ms, late_period, usb_errors;
+    // Startup frames lost while firmware/device initialization was still
+    // running are intentionally separate from steady-state mailbox skips.
+    uint64_t sent, startup_skipped, skipped, late_2ms, late_period, usb_errors;
     int usb_error_code;
     double max_scanout_to_send_ms, max_usb_transfer_ms;
 };
@@ -2125,6 +2128,10 @@ static void stereo_usb_confirm_flip(void *opaque, int eye, uint32_t msc,
     if (atomic_load_explicit(&u->stop, memory_order_relaxed))
         return;
 
+    if (!atomic_load_explicit(&u->confirmed, memory_order_relaxed))
+        atomic_store_explicit(&u->first_confirmed_msc_plus_one,
+                              (uint64_t)msc + 1, memory_order_relaxed);
+
     // seq is even while the payload is complete; odd during an update.
     // This avoids pairing an eye from one MSC with a UST from another.
     // The first acq_rel RMW prevents publishing payload before marking
@@ -2251,6 +2258,19 @@ static void *stereo_usb_sender_thread(void *opaque)
             uint32_t diff = msc - last_msc;
             if (diff > 1 && diff < 1000)
                 u->skipped += diff - 1;
+        } else {
+            uint64_t first_plus_one =
+                atomic_load_explicit(&u->first_confirmed_msc_plus_one,
+                                     memory_order_acquire);
+            if (first_plus_one) {
+                uint32_t initial_msc = (uint32_t)(first_plus_one - 1);
+                uint32_t startup_diff = msc - initial_msc;
+                // The initial confirmed flips happened while the USB
+                // worker was loading firmware/configuring the emitter.
+                // They were never sent, even though skipped_msc stays 0.
+                if (startup_diff < 100000)
+                    u->startup_skipped = startup_diff;
+            }
         }
         last_msc = msc;
         have_msc = true;
@@ -2333,6 +2353,7 @@ static void stereo_usb_start(struct ra_ctx *ctx)
     atomic_init(&u->mailbox_event, 0);
     atomic_init(&u->mailbox_ust_us, 0);
     atomic_init(&u->confirmed, 0);
+    atomic_init(&u->first_confirmed_msc_plus_one, 0);
     atomic_init(&u->wake_errors, 0);
     u->event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (u->event_fd < 0) {
@@ -2369,16 +2390,22 @@ static void stereo_usb_stop(struct ra_ctx *ctx)
     (void)write(u->event_fd, &one, sizeof(one));
     pthread_join(u->thread, NULL);
     close(u->event_fd);
+    uint64_t confirmed = atomic_load(&u->confirmed);
+    uint64_t explained = u->sent + u->startup_skipped + u->skipped;
+    uint64_t unaccounted = confirmed > explained ? confirmed - explained : 0;
     MP_INFO(ctx, "Stereo USB final: dry_run=%d init_status=%d "
-            "confirmed=%llu sent=%llu "
-            "skipped_msc=%llu wake_errors=%llu usb_errors=%llu "
+            "confirmed=%llu sent=%llu startup_skipped=%llu "
+            "skipped_msc=%llu unaccounted=%llu "
+            "wake_errors=%llu usb_errors=%llu "
             "last_usb_error=%d late_gt_2ms=%llu late_gt_period=%llu "
             "max_scanout_to_send_ms=%.3f max_usb_transfer_ms=%.3f "
-            "(dry-run or USB submissions only, NOT optical sync)\n",
+            "(USB calls only, NOT optical sync)\n",
             u->dry_run, u->init_status,
-            (unsigned long long)atomic_load(&u->confirmed),
+            (unsigned long long)confirmed,
             (unsigned long long)u->sent,
+            (unsigned long long)u->startup_skipped,
             (unsigned long long)u->skipped,
+            (unsigned long long)unaccounted,
             (unsigned long long)atomic_load(&u->wake_errors),
             (unsigned long long)u->usb_errors, u->usb_error_code,
             (unsigned long long)u->late_2ms,
