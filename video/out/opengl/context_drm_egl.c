@@ -112,7 +112,8 @@ struct stereo_kms {
     bool rt_mode;
     bool gpu_wait;
     bool legacy_mode;
-    // Experimental frame-duration gate; defaults to disabled for A/B.
+    // Native --drm-stereo-3d defaults to planned MSC hold; independent
+    // explicit 0/1 environment override for regressions.
     bool plan_hold;
     // Independent mpv VO wake edge; presentation feedback stays attached
     // to the configured --drm-stereo-pacing-eye. Default is the same eye.
@@ -120,7 +121,7 @@ struct stereo_kms {
     // Experimental one-slot priority rule: keep a ready pending pair
     // rather than discarding it when a newer movie frame is rendered.
     bool keep_ready_pending;
-    bool two_slot_queue; // Experimental bounded two-entry FIFO.
+    bool two_slot_queue; // Bounded FIFO: native stereo default, opt-out via env.
     uint64_t queue_second_enqueues, queue_second_promotions;
     uint64_t queue_full_skips, queue_gbm_skips, queue_unexpected_incoming;
     uint64_t queue_seek_resets, queue_seek_pending_flushes;
@@ -2078,6 +2079,26 @@ static bool drm_egl_set_color(struct ra_ctx *ctx, struct mp_image_params *params
     return true;
 }
 
+// Do not alter ordinary DRM/2D output or legacy SBS/PAIR experiment defaults.
+// The production --drm-stereo-3d path enables these two policies by default.
+// Strict 0/1 overrides permit independently bisecting queue and hold behavior.
+static bool stereo_env_policy(struct ra_ctx *ctx, const char *name,
+                              bool enabled, bool default_on)
+{
+    if (!enabled)
+        return false;
+    const char *value = getenv(name);
+    if (!value)
+        return default_on;
+    if (strcmp(value, "0") == 0)
+        return false;
+    if (strcmp(value, "1") == 0)
+        return true;
+    MP_WARN(ctx, "Invalid %s='%s' (expected 0 or 1; using default %d)\n",
+            name, value, default_on);
+    return default_on;
+}
+
 static bool drm_egl_init(struct ra_ctx *ctx)
 {
     if (!vo_drm_init(ctx->vo))
@@ -2103,12 +2124,13 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     const char *gpu_wait = getenv("MPV_DRM_STEREO_GPU_WAIT");
     p->stereo.gpu_wait = p->stereo.enabled && gpu_wait &&
                          strcmp(gpu_wait, "1") == 0;
-    const char *plan_hold = getenv("MPV_DRM_STEREO_PLAN_HOLD");
-    p->stereo.plan_hold = p->stereo.enabled && plan_hold &&
-                          strcmp(plan_hold, "1") == 0;
+    p->stereo.plan_hold = stereo_env_policy(ctx, "MPV_DRM_STEREO_PLAN_HOLD",
+                                            p->stereo.enabled, native_3d);
     drm->stereo_pair_plan_hold = p->stereo.plan_hold;
     if (p->stereo.plan_hold)
-        MP_INFO(ctx, "Stereo planned-hold MSC gate enabled (experimental)\n");
+        MP_INFO(ctx, "Stereo planned-hold MSC gate enabled\n");
+    else if (native_3d)
+        MP_INFO(ctx, "Stereo planned-hold MSC gate disabled (explicit opt-out)\n");
     p->stereo.render_wake_eye =
         drm->opts ? drm->opts->stereo_pacing_eye : 0;
     const char *render_wake = getenv("MPV_DRM_STEREO_RENDER_WAKE_EYE");
@@ -2130,14 +2152,20 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     const char *protect_pending = getenv("MPV_DRM_STEREO_KEEP_READY_PENDING");
     p->stereo.keep_ready_pending = p->stereo.enabled && protect_pending &&
                                    strcmp(protect_pending, "1") == 0;
-    const char *two_slot_queue = getenv("MPV_DRM_STEREO_TWO_SLOT_QUEUE");
-    p->stereo.two_slot_queue = p->stereo.enabled && two_slot_queue &&
-                               strcmp(two_slot_queue, "1") == 0;
+    p->stereo.two_slot_queue = stereo_env_policy(ctx,
+                                                 "MPV_DRM_STEREO_TWO_SLOT_QUEUE",
+                                                 p->stereo.enabled, native_3d);
     if (p->stereo.two_slot_queue) {
-        MP_INFO(ctx, "Stereo experimental two-slot pending FIFO enabled\n");
+        MP_INFO(ctx, "Stereo two-slot pending FIFO enabled\n");
         if (p->stereo.keep_ready_pending)
             MP_WARN(ctx, "TWO_SLOT_QUEUE supersedes KEEP_READY_PENDING\n");
+    } else if (native_3d) {
+        MP_INFO(ctx, "Stereo two-slot pending FIFO disabled (explicit opt-out)\n");
     }
+    if (p->stereo.enabled)
+        MP_INFO(ctx, "Stereo scheduling policy: plan_hold=%d two_slot_queue=%d "
+                "(native_3d=%d; overrides: PLAN_HOLD=0|1 TWO_SLOT_QUEUE=0|1)\n",
+                p->stereo.plan_hold, p->stereo.two_slot_queue, native_3d);
     const char *queue_test_hold = getenv("MPV_DRM_STEREO_QUEUE_TEST_HOLD_MS");
     if (queue_test_hold && p->stereo.two_slot_queue) {
         char *end = NULL;
