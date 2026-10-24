@@ -5303,3 +5303,92 @@ download**, first run `--cycles 2`, then `--cycles 25`.
 Only then interpret the 25-row CSV idle RSS and
 FD trends, final KMS summaries, and whether
 `restore_sdr` teardown warnings really disappeared.
+
+
+### 2026-10-25: repeated EOF/idle cycles pass 2/2 and 25/25
+
+Revised `mpv_stereo_eof_idle_cycles.py` (wait for
+`core-idle=false` after `file-loaded`) and binary
+`v0.41.0-dev-g9bb593e32` (both SDR teardown fixes).
+Two independent runs:
+`mpv-stereo-eof-idle-cycles-20261025-000530-345048`
+(two cycles, mpv PID 345049) and
+`mpv-stereo-eof-idle-cycles-20261025-000555-345167`
+(25 cycles, mpv PID 345168), each with full
+`.log`, `.jsonl` and `.csv` artifacts.
+
+**Results:** 2/2 and 25/25 cycles passed, both
+processes exited 0 after explicit IPC `quit`.
+The 25-cycle run lasted about 184 seconds, with 25
+distinct `end-file reason=eof` events, 25 separate
+DRM-stereo context initializations and 25 final
+DRM reports. No `Failed to commit atomic request`,
+`Failed to restore previous mode` or
+`Cannot restore SDR colorspace` in either run.
+This confirms that skipping redundant SDR restoration
+after `vo_drm_release_crtc` fixed the observed
+teardown `EINVAL` and premature no-request warning
+on target i915 under the tested SDR workload.
+
+**Physical KMS across all 25 contexts:**
+`flips=19012`, confirmed first-eye-L/R both
+3617, `missed_vblanks=0 parity_errors=0
+wrong_eye=0 wrong_hold=0 commit_errors=0
+fence_errors=0 pair_unpresented_discards=0
+pair_update_skips=0`. There were 168 expected
+`fence_deferrals` (nonblocking readiness checks,
+not errors). Two-slot FIFO counters totaled
+`second_enqueues=491 second_promotions=491`;
+`full_skips=0 gbm_skips=0 unexpected_incoming=0`,
+`remaining_pending=0 remaining_queued=0` at
+every EOF. `VOCTRL_RESET` count 100 across cycles;
+18 pending flushes and zero queued/building flushes
+are intentional reset behavior under these seeks,
+not pressure-induced discards. PTS traces record
+one startup frame ID gap in the first context
+(37->39, familiar startup artifact); none after.
+`planned_exact=3403 / adjacent_compared=3516`
+(96.79%) includes a major seek at every cycle
+and all EOF boundaries, so it does NOT measure
+steady-state smoothness; compare the earlier
+15-minute steady-state 99.981% baseline instead.
+
+**Resource quiescence:** after each of the 25 EOFs,
+`/proc/<pid>/fd` yielded 22 total FDs,
+0 DRM device FDs, 0 sync_file FDs,
+0 DMA-BUF FDs and 17 threads. Both full and
+two-cycle runs have nonempty CSV rows for each
+completed cycle; there is no FD or thread
+accumulation. Every cycle left mpv in
+`core-idle=true` with no active source path.
+The 25-cycle run remained in the same mpv PID,
+and each reload re-created the VO / DRM context.
+
+**Process RSS, 25-cycle run:** idle after first
+EOF=346512 KiB (338.39 MiB); after last EOF=
+360472 KiB (352.02 MiB), +13.63 MiB across
+24 intervals. Runtime memory warms up in the
+first ~10 cycles and then plateaus: for idle
+cycles 11-25 values remain ~347.25-352.02 MiB
+(range <4.8 MiB), with fitted linear slope
+~+0.058 MiB/cycle. The playing RSS on cycles
+11-25 stays ~386.75-389 MiB. This is not
+evidence of ongoing linear GBM/FD growth,
+but process RSS includes allocator and codec
+caches, so cannot strictly disprove a slow leak.
+If necessary, a longer soak with device-specific
+GPU memory accounting (e.g. fdinfo/DRM memory)
+could increase confidence.
+
+**Decision:** this completes the targeted QA
+for the optional `QUEUE2 + PLAN_HOLD` combination
+on i915 / Mesa 26.2.5, including steady-state,
+pause/resume/seek, forced occupied-FIFO seek,
+playlist transition, EOF idle cleanup and repeat
+VO reinitialization. The experimental knobs can
+be considered for *stereo-mode-only* defaults,
+but normal-mode regression and non-i915 driver
+behavior have not been established by these
+tests. Keep opt-out facilities during first
+default-on rollout, and do not enable test
+queue hold injection by default.
