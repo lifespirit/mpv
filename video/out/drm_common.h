@@ -153,6 +153,23 @@ struct drm_stereo_pts_sample {
     bool plan_comparable;
 };
 
+struct drm_stereo_async_log;
+
+// Immutable scalar diagnostic event. Never store pointers to GBM/DRM buffers.
+struct drm_stereo_async_drop {
+    const char *reason; // Fixed string literals owned by the caller.
+    uint64_t count, pending_gen, active_gen, frame_id;
+    double media_pts, age_ms;
+    bool pts_valid;
+    int fence_left, fence_right;
+    unsigned deferrals;
+    double first_deferral_ms, last_deferral_ms;
+    uint32_t last_deferral_msc;
+    double r_probe_age_ms;
+    uint32_t r_probe_msc;
+    int r_probe_left, r_probe_right;
+};
+
 struct vo_drm_state {
     drmModeConnector *connector;
     drmModeEncoder *encoder;
@@ -179,6 +196,7 @@ struct vo_drm_state {
     bool redraw;
     bool vt_switcher_active;
     bool waiting_for_flip;
+    struct drm_stereo_async_log *stereo_async_log;
 
     // Experimental opt-in SBS shutter-stereo diagnostics (no USB).
     // A submitted eye is tagged with the GBM buffer it belongs to.
@@ -363,6 +381,10 @@ void vo_drm_uninit(struct vo *vo);
 void vo_drm_wait_events(struct vo *vo, int64_t until_time_ns);
 void vo_drm_wait_on_flip(struct vo_drm_state *drm);
 void vo_drm_wakeup(struct vo *vo);
+
+// Nonblocking diagnostics: safe while stereo.mutex is held.
+void vo_drm_stereo_log_drop(struct vo_drm_state *drm,
+                             const struct drm_stereo_async_drop *drop);
 
 bool vo_drm_acquire_crtc(struct vo_drm_state *drm);
 void vo_drm_release_crtc(struct vo_drm_state *drm);
