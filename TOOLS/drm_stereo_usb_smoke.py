@@ -25,6 +25,8 @@ def main():
     ap.add_argument("--mode", default="2560x1440@120")
     ap.add_argument("--start", type=int, default=295)
     ap.add_argument("--length", type=int, default=15)
+    ap.add_argument("--usb-init-timeout-ms", type=int, default=3000,
+                    help="VO preflight readiness timeout, 100..10000 ms")
     ap.add_argument("--live-usb", action="store_true",
                     help="Enable actual USB IR commands; dry-run is default")
     ap.add_argument("--libnvstusb", type=Path,
@@ -39,6 +41,8 @@ def main():
         ap.error("video not found: " + str(args.video))
     if args.length < 5 or args.length > 120:
         ap.error("length must be 5..120 seconds")
+    if not 100 <= args.usb_init_timeout_ms <= 10000:
+        ap.error("--usb-init-timeout-ms must be 100..10000")
     if args.live_usb and (not args.firmware or not args.libnvstusb):
         ap.error("--live-usb requires --firmware and --libnvstusb")
     if args.live_usb and (not args.firmware.is_file() or
@@ -57,9 +61,11 @@ def main():
                 "MPV_DRM_STEREO_USB", "MPV_DRM_STEREO_USB_DRY_RUN",
                 "MPV_DRM_STEREO_USB_LIBRARY",
                 "MPV_DRM_STEREO_USB_FIRMWARE",
-                "MPV_DRM_STEREO_USB_INVERT_EYES"):
+                "MPV_DRM_STEREO_USB_INVERT_EYES",
+                "MPV_DRM_STEREO_USB_INIT_TIMEOUT_MS"):
         env.pop(key, None)
     env["MPV_DRM_STEREO_USB"] = "1"
+    env["MPV_DRM_STEREO_USB_INIT_TIMEOUT_MS"] = str(args.usb_init_timeout_ms)
     if not args.live_usb:
         env["MPV_DRM_STEREO_USB_DRY_RUN"] = "1"
     else:
@@ -121,6 +127,12 @@ def main():
         errors.append("insufficient confirmed KMS flips")
     if usb_values.get("sent", 0) < 100:
         errors.append("insufficient USB (or simulated) commands")
+    if "startup_skipped" not in usb_values:
+        errors.append("missing startup_skipped diagnostic (rebuild mpv)")
+    elif usb_values["startup_skipped"] != 0:
+        errors.append("USB preflight failed: startup_skipped nonzero")
+    if "Stereo USB: startup gate READY" not in content:
+        errors.append("USB emitter startup gate not confirmed")
     for field in ("wake_errors", "usb_errors"):
         if usb_values.get(field, 1) != 0:
             errors.append("USB " + field + " nonzero")
@@ -141,6 +153,7 @@ def main():
         "mode": "live" if args.live_usb else "dry-run",
         "mpv_returncode": rc,
         "timed_out": timed_out,
+        "usb_init_timeout_ms": args.usb_init_timeout_ms,
         "log": str(log_path),
         "usb": usb_values, "kms": kms_values,
         "policy": policy_values, "warnings": warnings, "errors": errors,
