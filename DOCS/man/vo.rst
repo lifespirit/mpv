@@ -709,6 +709,12 @@ Available video output drivers are:
         loads ``libnvstusb.so.0`` only when explicitly enabled.
         Configure ``MPV_DRM_STEREO_USB_LIBRARY`` and
         ``MPV_DRM_STEREO_USB_FIRMWARE`` as needed.
+        When USB is explicitly enabled, the first stereo movie flip
+        waits for successful emitter initialization (default readiness
+        timeout 3000ms; set ``MPV_DRM_STEREO_USB_INIT_TIMEOUT_MS``
+        to 100..10000 to adjust). USB init failure prevents stereo
+        VO startup rather than silently running without shutters.
+        The KMS realtime worker is never blocked by USB operations.
         ``MPV_DRM_STEREO_USB_INVERT_EYES=1`` reverses the USB eye
         assignment. This is NOT calibrated optical shutter synchronization:
         USB commands are emitted after physical flip confirmation, and

@@ -276,3 +276,93 @@ be explicitly gated on USB ready with a bounded timeout
 or whether the sender should prime the firmware earlier.
 Never silently block the realtime KMS worker on USB
 initialization or synchronous OUT transfers.
+
+
+## USB readiness gate (introduced after live test #2)
+
+The second 10-second live test, files
+`mpv-stereo-usb-1792880610-360260.{log,json}`, on build
+`v0.41.0-dev-gae80234aa` confirmed the startup hypothesis
+precisely: `confirmed=1214 sent=1109 startup_skipped=104
+skipped_msc=0 unaccounted=1`; `init_status=1
+usb_errors=0 wake_errors=0 late_gt_2ms=0
+late_gt_period=0`. Maximum scanout-UST-to-start-of-send
+was **0.361ms** and maximum real USB OUT was **0.314ms**.
+Physical KMS remained clean: zero missed_vblanks,
+parity_errors, wrong_eye, wrong_hold, commit_errors,
+fence_errors or discarded pairs; plan
+`exact=235/237` (99.16%). The USB firmware setup
+completed at log t=1.359s whereas the first KMS
+flip was submitted at t=0.491s. Thus **104 of 105**
+unmatched commands arose at startup; the remaining 1
+is plausibly an unsent final event at shutdown (not
+proven individually). This was a USB transport test,
+not optical phase validation.
+
+**New strict startup behavior when
+`MPV_DRM_STEREO_USB=1`:** in `drm_egl_init`, after
+creating the USB sender thread and **before**
+allowing mpv's frame producer to start the independent
+KMS worker, the non-realtime VO initialization thread
+waits for successful USB initialization and rate setup.
+The default readiness timeout is 3000ms, adjustable
+with `MPV_DRM_STEREO_USB_INIT_TIMEOUT_MS` (100..10000).
+`init_status` is atomic; `1` explicitly means library
+loaded, emitter opened, timing configured and no latched
+USB error. Dry-run uses the same readiness gate but no
+USB I/O. The log now prints:
+
+```text
+Stereo USB: sender initialized at 119.998Hz (dry_run=0 ...)
+Stereo USB: startup gate READY, took 900.000ms (timeout=3000ms; physical KMS stereo can now begin)
+Stereo KMS first atomic flip submitted: eye=L ...
+```
+
+(The 900ms is illustrative, not a target.) This
+changes no frame scheduler, eye selection or USB
+phase compensation. It merely moves the first
+movie L/R flip to **after** the firmware becomes ready.
+At init failure or readiness timeout, the requested
+DRM-stereo VO initialization aborts instead of
+displaying video with uninitialized shutter IR.
+The cleanup stops and joins the USB sender before
+releasing the VO; USB library calls still never block
+the realtime KMS worker. Note that the *readiness wait*
+is bounded, but on an extremely unresponsive
+`libnvstusb` library cleanup `pthread_join`
+may itself take longer. This is not a hard real-time
+timeout guarantee for teardown.
+
+The updated smoke script actively asserts a
+`Stereo USB: startup gate READY` log and
+`startup_skipped=0`, and accepts
+`--usb-init-timeout-ms N` for controlling the VO
+readiness deadline. A nonzero `unaccounted` from
+the final asynchronous shutdown remains a warning,
+not a test failure; KMS and optical counters are
+checked separately. Any nonzero `startup_skipped`
+on the new build means the gate failed and should
+be investigated before adding phase compensation.
+
+**Re-run two 10-second tests after recompilation:**
+first with dry-run (no USB):
+```sh
+python3 TOOLS/drm_stereo_usb_smoke.py \
+  "/path/to/half-sbs-movie.mkv" --length 10
+```
+then with the physical emitter attached (optical phase
+still UNCALIBRATED):
+```sh
+python3 TOOLS/drm_stereo_usb_smoke.py \
+  "/path/to/half-sbs-movie.mkv" --length 10 --live-usb \
+  --libnvstusb "/path/to/libnvstusb/src/.libs/libnvstusb.so" \
+  --firmware "/path/to/libnvstusb/nvstusb.fw"
+```
+
+**Required results:** 0 startup_skipped, 0 steady
+skipped_msc, 0 USB/KMS errors, nonzero send count,
+correct default `QUEUE2 + PLAN_HOLD`; first KMS
+flip logged *after* `startup gate READY`.
+There is still no evidence of actual optical eye
+transmission timing, so do not equate a software
+PASS with a usable glasses configuration.
