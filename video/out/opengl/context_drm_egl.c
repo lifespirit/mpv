@@ -2278,13 +2278,80 @@ static void *stereo_usb_sender_thread(void *opaque)
     uint32_t last_msc = 0;
     bool have_msc = false;
     while (!atomic_load_explicit(&u->stop, memory_order_acquire)) {
-        struct pollfd fd = {.fd = u->event_fd, .events = POLLIN};
-        int n = poll(&fd, 1, 100);
+        struct pollfd fd[2] = {
+            {.fd = u->event_fd, .events = POLLIN},
+            {.fd = u->control_fd, .events = POLLIN},
+        };
+        int n = poll(fd, 2, 100);
         if (n < 0 && errno == EINTR)
             continue;
-        if (n < 0 || (n > 0 && (fd.revents & (POLLERR | POLLNVAL))))
+        if (n < 0 || (n > 0 &&
+            ((fd[0].revents | fd[1].revents) & (POLLERR | POLLNVAL))))
             break;
         if (n == 0)
+            continue;
+        if (atomic_load_explicit(&u->stop, memory_order_acquire))
+            break;
+
+        // The same USB thread owns firmware timing and USB transfers.
+        // User commands never touch the KMS worker, nor race send_eye().
+        // At most one short FIFO read per wake; no blocking I/O here.
+        if (u->control_fd >= 0 && (fd[1].revents & POLLIN)) {
+            char buffer[256];
+            ssize_t nr = read(u->control_fd, buffer, sizeof(buffer) - 1);
+            if (nr > 0) {
+                buffer[nr] = '\0';
+                char *save = NULL;
+                for (char *line = strtok_r(buffer, "\n", &save);
+                     line; line = strtok_r(NULL, "\n", &save)) {
+                    int current = api.effective_timer_us(dev);
+                    long target = current;
+                    bool update = false;
+                    bool valid = false;
+                    if (strcmp(line, "get") == 0) {
+                        valid = true;
+                    } else if (line[0] == '+' || line[0] == '-' ||
+                               strncmp(line, "set ", 4) == 0) {
+                        const char *val = strncmp(line, "set ", 4) == 0
+                                          ? line + 4 : line;
+                        char *end = NULL;
+                        errno = 0;
+                        long number = strtol(val, &end, 10);
+                        if (!errno && end != val && *end == '\0') {
+                            target = val == line ? current + number : number;
+                            valid = true;
+                            update = true;
+                        }
+                    }
+                    int max_timer = (int)(1000000.0 / u->refresh_hz) - 500;
+                    if (valid && target >= 500 && target <= max_timer) {
+                        int rc = update
+                               ? api.set_eye_timer_us(dev, (int)target) : 0;
+                        if (rc == 0) {
+                            u->final_eye_timer_us = api.effective_timer_us(dev);
+                            if (update)
+                                u->control_updates++;
+                            MP_INFO(ctx, "Stereo USB phase control: "
+                                    "eye_timer_us=%d previous=%d "
+                                    "updates=%llu optical_verified=0\n",
+                                    u->final_eye_timer_us, current,
+                                    (unsigned long long)u->control_updates);
+                        } else {
+                            u->control_errors++;
+                            MP_WARN(ctx, "Stereo USB phase control: "
+                                    "libnvstusb rejected %ld us: %d\n",
+                                    target, rc);
+                        }
+                    } else {
+                        u->control_errors++;
+                        MP_WARN(ctx, "Stereo USB phase control: invalid "
+                                "command '%s' (get, +N, -N, set N; "
+                                "range 500..%d us)\n", line, max_timer);
+                    }
+                }
+            }
+        }
+        if (!(fd[0].revents & POLLIN))
             continue;
         uint64_t wake_count;
         if (read(u->event_fd, &wake_count, sizeof(wake_count)) !=
