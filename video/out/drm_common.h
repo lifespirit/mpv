@@ -192,6 +192,17 @@ struct vo_drm_state {
     int64_t stereo_max_commit_callback_ns;
     int64_t stereo_max_draw_callback_ns;
 
+    // CPU wall-clock pipeline diagnostics (not GPU fences or optical timings).
+    // Maxima are reset every 120 confirmed flips; wait count is cumulative.
+    int64_t stereo_max_gl_render_ns;
+    int64_t stereo_max_egl_swap_ns;
+    int64_t stereo_max_gbm_lock_ns;
+    int64_t stereo_max_wait_flip_ns;
+    int64_t stereo_max_atomic_ns;
+    int64_t stereo_max_swap_total_ns;
+    uint64_t stereo_wait_flip_calls;
+    uint64_t stereo_last_report_wait_flip_calls;
+
     char *card_path;
     int card_no;
     int fd;

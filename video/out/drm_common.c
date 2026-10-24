@@ -1079,6 +1079,8 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                                                   drm->stereo_last_report_target_misses;
             const uint64_t window_discards = drm->stereo_queue_discards -
                                              drm->stereo_last_report_queue_discards;
+            const uint64_t window_wait_calls = drm->stereo_wait_flip_calls -
+                                                drm->stereo_last_report_wait_flip_calls;
             MP_INFO(drm, "DRM SBS test: flips=%llu shown_hz=%.3f "
                     "window_hz=%.3f window_missed=%llu window_parity=%llu "
                     "missed_vblanks=%llu parity_errors=%llu max_gap=%u "
@@ -1088,6 +1090,10 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     "slot=%s pending=%u peak_pending=%u discards=%llu window_discards=%llu "
                     "target_misses=%llu window_target_misses=%llu "
                     "max_commit_callback_ms=%.3f max_draw_callback_ms=%.3f "
+                    "pipeline_render_ms=%.3f pipeline_egl_ms=%.3f "
+                    "pipeline_gbm_lock_ms=%.3f pipeline_wait_ms=%.3f "
+                    "pipeline_atomic_ms=%.3f pipeline_swap_ms=%.3f "
+                    "pipeline_wait_calls=%llu window_wait_calls=%llu "
                     "draws=%llu commit_errors=%llu msc=%u eye=%s "
                     "(video output only; USB disabled)\n",
                     (unsigned long long)drm->stereo_flips, shown_hz,
@@ -1112,6 +1118,14 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     (unsigned long long)window_target_misses,
                     drm->stereo_max_commit_callback_ns / 1000000.0,
                     drm->stereo_max_draw_callback_ns / 1000000.0,
+                    drm->stereo_max_gl_render_ns / 1000000.0,
+                    drm->stereo_max_egl_swap_ns / 1000000.0,
+                    drm->stereo_max_gbm_lock_ns / 1000000.0,
+                    drm->stereo_max_wait_flip_ns / 1000000.0,
+                    drm->stereo_max_atomic_ns / 1000000.0,
+                    drm->stereo_max_swap_total_ns / 1000000.0,
+                    (unsigned long long)drm->stereo_wait_flip_calls,
+                    (unsigned long long)window_wait_calls,
                     (unsigned long long)drm->stereo_draws,
                     (unsigned long long)drm->stereo_commit_errors, msc,
                     drm->stereo_flip_eye ? "R" : "L");
@@ -1122,6 +1136,13 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
             drm->stereo_last_report_hold = drm->stereo_wrong_hold_slots;
             drm->stereo_last_report_target_misses = drm->stereo_target_misses;
             drm->stereo_last_report_queue_discards = drm->stereo_queue_discards;
+            drm->stereo_last_report_wait_flip_calls = drm->stereo_wait_flip_calls;
+            drm->stereo_max_gl_render_ns = 0;
+            drm->stereo_max_egl_swap_ns = 0;
+            drm->stereo_max_gbm_lock_ns = 0;
+            drm->stereo_max_wait_flip_ns = 0;
+            drm->stereo_max_atomic_ns = 0;
+            drm->stereo_max_swap_total_ns = 0;
             drm->stereo_max_commit_callback_ns = 0;
             drm->stereo_max_draw_callback_ns = 0;
             drm->stereo_queue_peak = 0;

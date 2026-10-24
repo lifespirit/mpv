@@ -333,6 +333,11 @@ static void queue_flip(struct ra_ctx *ctx, struct gbm_frame *frame)
 
     const int64_t commit_time_ns = mp_time_ns();
     int ret = drmModeAtomicCommit(drm->fd, atomic_ctx->request, flags, drm);
+    if (drm->stereo_test_enabled) {
+        const int64_t elapsed_ns = mp_time_ns() - commit_time_ns;
+        drm->stereo_max_atomic_ns =
+            MPMAX(drm->stereo_max_atomic_ns, elapsed_ns);
+    }
 
     if (ret)
         MP_WARN(ctx->vo, "Failed to commit atomic request: %s\n", mp_strerror(ret));
@@ -432,9 +437,23 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
     if (!drm->active)
         return;
 
+    const int64_t stereo_swap_start_ns =
+        drm->stereo_test_enabled ? mp_time_ns() : 0;
     eglSwapBuffers(p->egl.display, p->egl.surface);
+    if (drm->stereo_test_enabled) {
+        const int64_t elapsed_ns = mp_time_ns() - stereo_swap_start_ns;
+        drm->stereo_max_egl_swap_ns =
+            MPMAX(drm->stereo_max_egl_swap_ns, elapsed_ns);
+    }
 
+    const int64_t gbm_lock_start_ns =
+        drm->stereo_test_enabled ? mp_time_ns() : 0;
     struct gbm_bo *new_bo = gbm_surface_lock_front_buffer(p->gbm.surface);
+    if (drm->stereo_test_enabled) {
+        const int64_t elapsed_ns = mp_time_ns() - gbm_lock_start_ns;
+        drm->stereo_max_gbm_lock_ns =
+            MPMAX(drm->stereo_max_gbm_lock_ns, elapsed_ns);
+    }
     if (!new_bo) {
         MP_ERR(ctx->vo, "Couldn't lock front buffer\n");
         return;
@@ -449,7 +468,15 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
            p->gbm.num_bos > ctx->vo->opts->swapchain_depth ||
            !gbm_surface_has_free_buffers(p->gbm.surface)) {
         if (drm->waiting_for_flip) {
+            const int64_t wait_start_ns =
+                drm->stereo_test_enabled ? mp_time_ns() : 0;
             vo_drm_wait_on_flip(drm);
+            if (drm->stereo_test_enabled) {
+                const int64_t elapsed_ns = mp_time_ns() - wait_start_ns;
+                drm->stereo_max_wait_flip_ns =
+                    MPMAX(drm->stereo_max_wait_flip_ns, elapsed_ns);
+                ++drm->stereo_wait_flip_calls;
+            }
             swapchain_step(ctx);
         }
         if (p->gbm.num_bos <= 1)
@@ -470,6 +497,9 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
         drm->stereo_queue_ahead = p->gbm.num_bos > 0 ? p->gbm.num_bos - 1 : 0;
         drm->stereo_queue_peak = MPMAX(drm->stereo_queue_peak,
                                        drm->stereo_queue_ahead);
+        const int64_t elapsed_ns = mp_time_ns() - stereo_swap_start_ns;
+        drm->stereo_max_swap_total_ns =
+            MPMAX(drm->stereo_max_swap_total_ns, elapsed_ns);
     }
     drm->redraw = false;
 }

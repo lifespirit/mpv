@@ -126,7 +126,18 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         ++p->stereo_draw_count;
     }
 
+#if HAVE_DRM
+    const int64_t stereo_render_start_ns =
+        p->stereo_test ? mp_time_ns() : 0;
+#endif
     gl_video_render_frame(p->renderer, frame, &fbo, RENDER_FRAME_DEF);
+#if HAVE_DRM
+    if (p->stereo_test) {
+        const int64_t elapsed_ns = mp_time_ns() - stereo_render_start_ns;
+        vo->drm->stereo_max_gl_render_ns =
+            MPMAX(vo->drm->stereo_max_gl_render_ns, elapsed_ns);
+    }
+#endif
     if (!sw->fns->submit_frame(sw, frame)) {
         MP_ERR(vo, "Failed presenting frame!\n");
         return VO_FALSE;
