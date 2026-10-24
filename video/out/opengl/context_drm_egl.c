@@ -2474,6 +2474,7 @@ static bool stereo_usb_start(struct ra_ctx *ctx)
     }
     struct stereo_usb *u = &p->stereo.usb;
     u->ctx = ctx;
+    u->control_fd = -1;
     u->timestamp_monotonic = drm->stereo_ust_monotonic;
     u->refresh_hz = vo_drm_get_display_fps(drm); // PHYSICAL, not logical 60 Hz.
     u->firmware = talloc_strdup(p, getenv("MPV_DRM_STEREO_USB_FIRMWARE")
@@ -2500,9 +2501,57 @@ static bool stereo_usb_start(struct ra_ctx *ctx)
     atomic_init(&u->confirmed, 0);
     atomic_init(&u->first_confirmed_msc_plus_one, 0);
     atomic_init(&u->wake_errors, 0);
+
+    const char *control = getenv("MPV_DRM_STEREO_USB_CONTROL");
+    if (control && strcmp(control, "1") == 0) {
+        if (u->dry_run) {
+            MP_ERR(ctx, "Stereo USB: runtime eye-timer control requires "
+                   "live hardware (dry-run has no firmware timing)\n");
+            return false;
+        }
+        const char *dir = getenv("XDG_RUNTIME_DIR");
+        struct stat st;
+        if (!dir || !*dir || stat(dir, &st) != 0 ||
+            !S_ISDIR(st.st_mode) || st.st_uid != geteuid() ||
+            (st.st_mode & 0077) != 0) {
+            MP_ERR(ctx, "Stereo USB: runtime calibration requires a "
+                   "private XDG_RUNTIME_DIR owned by this user\n");
+            return false;
+        }
+        u->control_path = talloc_asprintf(p, "%s/mpv-stereo-usb-%ld.fifo",
+                                           dir, (long)getpid());
+        if (strlen(u->control_path) >= 240) {
+            MP_ERR(ctx, "Stereo USB: runtime FIFO path too long\n");
+            return false;
+        }
+        // Never delete or replace an existing FIFO on start.
+        if (mkfifo(u->control_path, 0600) != 0) {
+            MP_ERR(ctx, "Stereo USB: failed to create calibration FIFO "
+                   "'%s': %s\n", u->control_path, mp_strerror(errno));
+            return false;
+        }
+        u->control_fd = open(u->control_path,
+                             O_RDWR | O_NONBLOCK | O_CLOEXEC);
+        if (u->control_fd < 0) {
+            MP_ERR(ctx, "Stereo USB: failed to open calibration FIFO: %s\n",
+                   mp_strerror(errno));
+            unlink(u->control_path);
+            return false;
+        }
+        MP_INFO(ctx, "Stereo USB: live eye-timer control FIFO: %s "
+                "(get, +N, -N, set N; timer microseconds)\n",
+                u->control_path);
+    } else if (control && strcmp(control, "0") != 0) {
+        MP_WARN(ctx, "Invalid MPV_DRM_STEREO_USB_CONTROL='%s' "
+                "(expected 0 or 1; control disabled)\n", control);
+    }
     u->event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (u->event_fd < 0) {
         MP_ERR(ctx, "Stereo USB: eventfd failed: %s\n", mp_strerror(errno));
+        if (u->control_fd >= 0) {
+            close(u->control_fd);
+            unlink(u->control_path);
+        }
         return false;
     }
     int err = pthread_create(&u->thread, NULL, stereo_usb_sender_thread, u);
@@ -2510,6 +2559,10 @@ static bool stereo_usb_start(struct ra_ctx *ctx)
         MP_ERR(ctx, "Stereo USB: cannot start sender thread: %s\n",
                mp_strerror(err));
         close(u->event_fd);
+        if (u->control_fd >= 0) {
+            close(u->control_fd);
+            unlink(u->control_path);
+        }
         return false;
     }
     u->started = true;
@@ -2579,6 +2632,17 @@ static void stereo_usb_stop(struct ra_ctx *ctx)
     (void)write(u->event_fd, &one, sizeof(one));
     pthread_join(u->thread, NULL);
     close(u->event_fd);
+    if (u->control_fd >= 0) {
+        close(u->control_fd);
+        unlink(u->control_path);
+    }
+    MP_INFO(ctx, "Stereo USB phase control final: enabled=%d "
+            "updates=%llu errors=%llu eye_timer_us=%d "
+            "(firmware command parameter; lens timing NOT calibrated)\n",
+            u->control_fd >= 0,
+            (unsigned long long)u->control_updates,
+            (unsigned long long)u->control_errors,
+            u->final_eye_timer_us);
     uint64_t confirmed = atomic_load(&u->confirmed);
     uint64_t explained = u->sent + u->startup_skipped + u->skipped;
     uint64_t unaccounted = confirmed > explained ? confirmed - explained : 0;
