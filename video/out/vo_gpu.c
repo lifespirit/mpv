@@ -129,7 +129,10 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
             gl_video_set_sbs_eye(p->renderer, p->stereo_full_src, eye);
             vo->drm->stereo_draw_eye = eye;
             ++vo->drm->stereo_draws;
+            int64_t render_start_ns = mp_time_ns();
             gl_video_render_frame(p->renderer, frame, &eye_fbo, RENDER_FRAME_DEF);
+            vo_drm_stereo_pair_note_eye_render(p->ctx, eye,
+                                                 mp_time_ns() - render_start_ns);
             if (!sw->fns->submit_frame(sw, frame))
                 return VO_FALSE;
             // Captures the locked GBM BO, but does NOT queue a KMS flip.

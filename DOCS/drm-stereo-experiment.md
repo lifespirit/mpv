@@ -4071,3 +4071,28 @@ the same pacing eye and GPU-fence settings. Compare physical
 aggregate final statistics. Do not mistake a dropped *diagnostic event*
 for a dropped display refresh. This source patch requires a local build
 and hardware validation.
+
+
+
+### Experimental confirmed-MSC planned-hold gate (source-only)
+
+Branch: `feature/drm-stereo-msc-presentation`, based on
+`feature/drm-stereo-async-logging`.
+
+`MPV_DRM_STEREO_PLAN_HOLD=1` enables a strictly opt-in lower-bound
+hold gate. The current movie generation's ORIGINAL `num_vsyncs` describes
+the number of complete L/R display cycles before the next image may
+begin. The actual first confirmed LEFT MSC is recorded by the KMS worker
+AFTER successful page-flip event dispatch, never from an atomic-submit
+guess. The next generation can be promoted on L only when
+`target_msc >= first_left_msc + 2 * clamp(planned_vsyncs, 1, 4)`.
+Existing native-fence checks and GBM ownership rules still apply.
+The default remains OFF for a scientifically comparable baseline.
+
+CAUTION: A lower-bound gate is not an A/V-synchronized scheduler by itself:
+late frames may extend display duration. The initial 120s experiment must
+report `Stereo plan hold final` counters, movie frame-ID gaps, and
+`Stereo PTS final` relative drift. If drift grows, disable the gate and
+build media-clock deadline skipping before enabling it as a default.
+CPU measurements of renderer / EGL swap / fence-export calls describe CPU
+command-submission work, not actual GPU completion.

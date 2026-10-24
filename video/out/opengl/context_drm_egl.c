@@ -97,6 +97,11 @@ struct stereo_pair {
     bool pts_valid;
     int planned_vsyncs;
     bool display_synced;
+    // Set only on an actually confirmed FIRST LEFT of this generation.
+    bool first_left_confirmed;
+    uint32_t first_left_msc;
+    // Producer-side render/submit timings; mp_time_ns is CPU monotonic.
+    int64_t render_ns[2], egl_swap_ns[2], fence_export_ns[2];
     // CPU time when BOTH eye GBM front buffers were published as a pair.
     int64_t ready_ns;
 };
@@ -107,6 +112,8 @@ struct stereo_kms {
     bool rt_mode;
     bool gpu_wait;
     bool legacy_mode;
+    // Experimental frame-duration gate; defaults to disabled for A/B.
+    bool plan_hold;
     // Diagnostic control: keep rendering new frames, but use only the
     // first complete pair for all KMS scanout flips.
     bool freeze_pair;
@@ -861,6 +868,28 @@ static void *stereo_kms_thread(void *arg)
                            s->min_pair_age_ns);
         bool eligible = eye == 0 && s->pending.bo[0] && age_ok &&
                         s->num_retired < MP_ARRAY_SIZE(s->retired);
+        // mpv's requested num_vsyncs is the hold of the PREVIOUS movie
+        // generation. Both eye scans for one movie frame are one logical
+        // cycle. Do not advance the movie frame before the previous image
+        // completed its requested number of L/R cycles. Use actual MSC of
+        // its FIRST confirmed L; submitted target MSC can be inaccurate.
+        // This is an opt-in diagnostic gating experiment. A late GPU frame
+        // can increase A/V latency; a future media-clock anchored scheduler
+        // may elect to skip it instead of accumulating such delay.
+        bool plan_late = false;
+        if (eligible && s->plan_hold && s->active.first_left_confirmed &&
+            s->active.display_synced && s->active.planned_vsyncs > 0) {
+            const uint32_t due = s->active.first_left_msc +
+                2u * MPCLAMP(s->active.planned_vsyncs, 1, 4);
+            if ((int32_t)(target_msc - due) < 0) {
+                eligible = false;
+                drm->stereo_pair_plan_early_blocks++;
+            } else {
+                plan_late = (int32_t)(target_msc - due) > 0;
+            }
+        } else if (eligible && s->plan_hold && !s->active.first_left_confirmed) {
+            drm->stereo_pair_plan_anchor_missing++;
+        }
         bool fences_ready = true;
         if (eligible && s->native_fence) {
             drm->stereo_pair_fence_checks++;
@@ -971,6 +1000,11 @@ static void *stereo_kms_thread(void *arg)
             if (promote) {
                 if (s->native_fence)
                     drm->stereo_pair_fence_promotions++;
+                if (s->plan_hold) {
+                    drm->stereo_pair_plan_due_promotions++;
+                    if (plan_late)
+                        drm->stereo_pair_plan_late_promotions++;
+                }
                 old = s->active;
                 s->active = s->pending;
                 s->pending = (struct stereo_pair){0};
@@ -1056,6 +1090,15 @@ static void *stereo_kms_thread(void *arg)
                     MP_ERR(ctx, "Stereo DRM event processing failed\n");
                     s->stop = true;
                 } else if (!drm->waiting_for_flip) {
+                    // The scanout callback has confirmed the hardware MSC.
+                    // Never anchor a requested hold to drmModeAtomicCommit.
+                    if (drm->stereo_flip_eye == 0 &&
+                        drm->stereo_pair_first_eye_in_generation &&
+                        drm->stereo_pair_display_generation ==
+                            s->active.generation) {
+                        s->active.first_left_confirmed = true;
+                        s->active.first_left_msc = drm->stereo_last_msc;
+                    }
                     // Physical KMS scanout remains independent at 120Hz.
                     // The VO advances once per full L/R cycle. By default
                     // pace it on L, but allow an opt-in R-edge experiment to
@@ -1182,6 +1225,19 @@ void vo_drm_stereo_pair_set_frame_info(struct ra_ctx *ctx,
     pthread_mutex_unlock(&s->mutex);
 }
 
+void vo_drm_stereo_pair_note_eye_render(struct ra_ctx *ctx, int eye,
+                                         int64_t render_ns)
+{
+    struct priv *p = ctx->priv;
+    struct stereo_kms *s = &p->stereo;
+    if (!s->enabled || !s->initialized || eye < 0 || eye > 1)
+        return;
+    // The producer owns building, but keep metadata ordering explicit.
+    pthread_mutex_lock(&s->mutex);
+    s->building.render_ns[eye] = render_ns;
+    pthread_mutex_unlock(&s->mutex);
+}
+
 bool vo_drm_stereo_pair_begin_eye(struct ra_ctx *ctx, int eye)
 {
     struct priv *p = ctx->priv;
@@ -1213,13 +1269,16 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
         const int eye = s->capture_eye;
         if (eye != 0 && eye != 1)
             return;
+        const int64_t egl_swap_start_ns = mp_time_ns();
         struct gbm_surface *surface = eye ? s->right_gbm : p->gbm.surface;
         EGLSurface egl_surface = eye ? s->right_egl : p->egl.surface;
         if (!eglSwapBuffers(p->egl.display, egl_surface)) {
             MP_ERR(ctx, "EGL stereo eye %d swap failed\n", eye);
             return;
         }
+        const int64_t egl_swap_duration_ns = mp_time_ns() - egl_swap_start_ns;
         int fence_fd = 0;
+        const int64_t fence_export_start_ns = mp_time_ns();
         if (s->native_fence) {
             fence_fd = stereo_export_native_fence(ctx);
             if (!fence_fd) {
@@ -1275,6 +1334,9 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
         }
         s->building.bo[eye] = bo;
         s->building.fence_fd[eye] = fence_fd;
+        s->building.egl_swap_ns[eye] = egl_swap_duration_ns;
+        s->building.fence_export_ns[eye] =
+            mp_time_ns() - fence_export_start_ns;
         if (eye == 1 && s->building.bo[0] && s->building.bo[1]) {
             s->building.generation = ++s->next_generation;
             s->building.ready_ns = mp_time_ns();
@@ -1417,6 +1479,14 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
                     (unsigned long long)drm->stereo_commit_errors);
 
             if (drm->stereo_pair_mode) {
+                MP_INFO(ctx, "Stereo plan hold final: enabled=%d "
+                        "early_blocks=%llu due_promotions=%llu "
+                        "late_promotions=%llu anchor_missing=%llu\n",
+                        drm->stereo_pair_plan_hold,
+                        (unsigned long long)drm->stereo_pair_plan_early_blocks,
+                        (unsigned long long)drm->stereo_pair_plan_due_promotions,
+                        (unsigned long long)drm->stereo_pair_plan_late_promotions,
+                        (unsigned long long)drm->stereo_pair_plan_anchor_missing);
                 double drop_age_avg_ms = drm->stereo_pair_drop_age_samples
                     ? drm->stereo_pair_drop_age_sum_ns /
                       (1000000.0 * drm->stereo_pair_drop_age_samples) : 0.0;
@@ -1754,6 +1824,12 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     const char *gpu_wait = getenv("MPV_DRM_STEREO_GPU_WAIT");
     p->stereo.gpu_wait = p->stereo.enabled && gpu_wait &&
                          strcmp(gpu_wait, "1") == 0;
+    const char *plan_hold = getenv("MPV_DRM_STEREO_PLAN_HOLD");
+    p->stereo.plan_hold = p->stereo.enabled && plan_hold &&
+                          strcmp(plan_hold, "1") == 0;
+    drm->stereo_pair_plan_hold = p->stereo.plan_hold;
+    if (p->stereo.plan_hold)
+        MP_INFO(ctx, "Stereo planned-hold MSC gate enabled (experimental)\n");
     const char *freeze_pair = getenv("MPV_DRM_STEREO_FREEZE_PAIR");
     p->stereo.freeze_pair = p->stereo.enabled && freeze_pair &&
                              strcmp(freeze_pair, "1") == 0;

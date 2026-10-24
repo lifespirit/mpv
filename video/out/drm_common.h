@@ -282,6 +282,11 @@ struct vo_drm_state {
     bool stereo_pair_sequence_mode;
     uint64_t stereo_pair_sequence_catchups;
     bool stereo_pair_gpu_wait;
+    bool stereo_pair_plan_hold;
+    uint64_t stereo_pair_plan_early_blocks;
+    uint64_t stereo_pair_plan_due_promotions;
+    uint64_t stereo_pair_plan_late_promotions;
+    uint64_t stereo_pair_plan_anchor_missing;
     uint64_t stereo_pair_gpu_waits;
     int64_t stereo_max_gpu_wait_ns;
     // Optional EGL native sync_file FD readiness checks before new pairs
@@ -393,6 +398,8 @@ void vo_drm_release_crtc(struct vo_drm_state *drm);
 // The EGL context remains owned by the VO/rendering thread.
 struct ra_ctx;
 bool vo_drm_stereo_pair_begin_eye(struct ra_ctx *ctx, int eye);
+void vo_drm_stereo_pair_note_eye_render(struct ra_ctx *ctx, int eye,
+                                         int64_t render_ns);
 bool vo_drm_stereo_pair_can_capture(struct ra_ctx *ctx);
 void vo_drm_stereo_pair_set_frame_info(struct ra_ctx *ctx,
                                        uint64_t frame_id, double media_pts,
