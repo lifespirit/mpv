@@ -135,7 +135,9 @@ struct stereo_usb {
     // Startup frames lost while firmware/device initialization was still
     // running are intentionally separate from steady-state mailbox skips.
     uint64_t sent, startup_skipped, skipped, late_2ms, late_period, usb_errors;
+    uint64_t signed_lag_samples, signed_lag_negative;
     int usb_error_code;
+    double min_signed_scanout_to_send_ms, max_signed_scanout_to_send_ms;
     double max_scanout_to_send_ms, max_usb_transfer_ms;
 };
 
@@ -2281,6 +2283,17 @@ static void *stereo_usb_sender_thread(void *opaque)
                 int64_t start_us = (int64_t)ts.tv_sec * 1000000LL +
                                     ts.tv_nsec / 1000;
                 double ms = (start_us - (int64_t)ust_us) / 1000.0;
+                if (!u->signed_lag_samples ||
+                    ms < u->min_signed_scanout_to_send_ms)
+                    u->min_signed_scanout_to_send_ms = ms;
+                if (!u->signed_lag_samples ||
+                    ms > u->max_signed_scanout_to_send_ms)
+                    u->max_signed_scanout_to_send_ms = ms;
+                u->signed_lag_samples++;
+                if (ms < 0)
+                    u->signed_lag_negative++;
+                // Keep the old nonnegative-only maximum for compatibility,
+                // but use the SIGNED extrema when diagnosing vblank phase.
                 if (ms > u->max_scanout_to_send_ms)
                     u->max_scanout_to_send_ms = ms;
                 if (ms > 2.0)
@@ -2351,6 +2364,12 @@ static bool stereo_usb_start(struct ra_ctx *ctx)
     u->invert_eyes = invert && strcmp(invert, "1") == 0;
     const char *dry_run = getenv("MPV_DRM_STEREO_USB_DRY_RUN");
     u->dry_run = dry_run && strcmp(dry_run, "1") == 0;
+    const char *eye_timer = getenv("NVSTUSB_EYE_TIMER_US");
+    if (eye_timer && *eye_timer && !u->dry_run)
+        MP_WARN(ctx, "Stereo USB: experimental libnvstusb firmware "
+                "eye timer override requested: %s us; "
+                "NOT measured optical phase. The library must be built "
+                "from feature/usb-eye-timer-calibration.\n", eye_timer);
     atomic_init(&u->stop, false);
     atomic_init(&u->init_status, 0);
     atomic_init(&u->mailbox_seq, 0);
@@ -2447,6 +2466,9 @@ static void stereo_usb_stop(struct ra_ctx *ctx)
             "wake_errors=%llu usb_errors=%llu "
             "last_usb_error=%d late_gt_2ms=%llu late_gt_period=%llu "
             "max_scanout_to_send_ms=%.3f max_usb_transfer_ms=%.3f "
+            "signed_lag_samples=%llu signed_lag_negative=%llu "
+            "min_signed_scanout_to_send_ms=%.3f "
+            "max_signed_scanout_to_send_ms=%.3f "
             "(USB calls only, NOT optical sync)\n",
             u->dry_run,
             atomic_load_explicit(&u->init_status, memory_order_acquire),
@@ -2459,7 +2481,11 @@ static void stereo_usb_stop(struct ra_ctx *ctx)
             (unsigned long long)u->usb_errors, u->usb_error_code,
             (unsigned long long)u->late_2ms,
             (unsigned long long)u->late_period,
-            u->max_scanout_to_send_ms, u->max_usb_transfer_ms);
+            u->max_scanout_to_send_ms, u->max_usb_transfer_ms,
+            (unsigned long long)u->signed_lag_samples,
+            (unsigned long long)u->signed_lag_negative,
+            u->min_signed_scanout_to_send_ms,
+            u->max_signed_scanout_to_send_ms);
     u->started = false;
 }
 
