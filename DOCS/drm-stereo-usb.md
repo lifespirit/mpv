@@ -640,3 +640,89 @@ receiver lock/acquisition and startup synchrony.
 A constant offset alone will not correct random
 phase lock or drift. No KMS scheduler modification
 is justified by the current transport-perfect log.
+
+
+## 3500us optical repeats: highly variable visible phase (2026-10-25)
+
+Four **independent** launches with the same requested
+`NVSTUSB_EYE_TIMER_US=3500`, same 20-second
+`drm-optical-sbs.mkv` 4-phase fixture, same
+DP-1 2560x1440@120Hz, Intel Iris Xe/i915 and
+`v0.41.0-dev-g2237b8193-dirty` build:
+`mpv-optical-timer-3500.log`,
+`mpv-optical-timer-3500-2.log`,
+`mpv-optical-timer-3500-3.log`, and
+`mpv-optical-timer-3500-4.log`.
+
+| Run | User-observed through glasses | Confirmed/sent | Plan exact | Max real USB call | Signed UST-to-send range |
+| --- | --- | --- | --- | --- | --- |
+| 1 | ~half vertical square contaminated | 2404/2404 | 477/477 | 0.374ms | -0.440..+0.421ms |
+| 2 | tiny contamination band at top | 2403/2403 | 477/477 | 0.285ms | -0.441..+2.367ms (one >2ms wake) |
+| 3 | ~one-fifth of square contaminated | 2399/2399 | 477/477 | 0.179ms | -0.459..-0.264ms |
+| 4 | almost ideal, faint bottom leakage | 2399/2399 | 476/477 | 0.769ms | -0.458..-0.287ms |
+
+All four: `startup_skipped=0 skipped_msc=0
+unaccounted=0 wake_errors=0 usb_errors=0`,
+KMS `missed_vblanks=parity_errors=wrong_eye=
+wrong_hold=commit_errors=fence_errors=0`,
+`pair_unpresented_discards=0`, no full/GBM
+queue pressure. Startup gate READY preceded first
+KMS commit by 80–115ms depending on the run.
+No sustained reported USB transfer lag. The
+single one-cycle plan discrepancy in run 4 does
+not explain the between-run full-height phase
+difference. Plan/USB software success does not
+establish correct optical lens phase.
+
+**Most informative inference:** with unchanged
+requested timer, optical band location varies
+substantially and even switches top vs bottom.
+A single **fixed** eye timer offset cannot
+reliably explain/repair the observed between-run
+variation. Candidate unmeasured mechanisms:
+IR firmware timer state/acquisition, USB-to-IR
+phase relative to scanout, glasses receiver
+locking, and LCD raster/pixel-response. The
+sample is a manually observed four-run series,
+not calibrated optical timing data.
+
+**Caveat: actual library timer setting was not
+verifiable from these mpv logs.** They contain
+mpv's `override requested: 3500 us`, not
+libnvstusb's stderr acknowledgement. For
+reproducible A/B tests, a follow-up calibration
+branch of `libnvstusb` now exports
+`nvstusb_effective_eye_timer_us()` and the mpv
+USB worker dynamically reads it. If the env
+override is present and the getter is missing
+or reports a different value, VO initialization
+fails closed (status=-5). mpv now logs the
+confirmed effective microseconds. The default
+USB path continues to work with old libraries
+when no timer override was requested.
+
+Note 2394–2399 of the 2399–2404 signed
+`CLOCK_MONOTONIC - DRM UST` samples on each
+run were **negative**, typically about
+-0.3..-0.46ms. Such a signed result must not
+be interpreted literally as a command preceding
+physical scanout; the semantics/offset of
+DRM UST need external validation before using
+it to fit optical lens phase.
+
+**Recommended next controlled experiment:**
+compile both updated branches, verify the log
+`Stereo USB: verified firmware eye timer=3500 us`,
+then run independent interleaved values 3500,
+4500, 5500 and **unset** (native rate default)
+several times each. Record whether the
+contamination boundary is stationary or MOVES
+within one uninterrupted run, its approximate
+fraction and whether top or bottom. If the
+same verified timer still yields markedly
+different fixed phases across launches, focus
+on initial acquisition/timer state and phase
+locking rather than further guessing offsets.
+Do not claim an optical PASS, change KMS
+pacing, or apply arbitrary per-run compensation
+without lens/screen photodiode timing.
