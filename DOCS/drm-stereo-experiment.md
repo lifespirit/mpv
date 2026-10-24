@@ -4502,3 +4502,76 @@ intervals, no long-term accumulation of relative PTS drift. An
 apparent success must still be validated by perceptual A/V timing
 and longer-run tests. Media-clock deadlines remain a separate
 future step, not implicitly solved by PLAN_HOLD.
+
+
+### Two-slot FIFO + planned MSC hold: 120-second successful A/B
+
+Test: `mpv-stereo-queue2-hold.log`, same binary
+`v0.41.0-dev-gc51dfaddc` as isolated QUEUE2, with
+`MPV_DRM_STEREO_TWO_SLOT_QUEUE=1` AND
+`MPV_DRM_STEREO_PLAN_HOLD=1`. Other opt-in stereo controls
+unset. Display DP-1 2560x1440@120 Hz, source 23.976 fps
+half-SBS, start=295 length=120, display-resample,
+right-eye VO pacing and native GPU sync_file fences.
+
+**Integrity:** 14,401 physical flips, zero missed_vblanks,
+parity_errors, wrong_eye, wrong_hold or in-play commit errors.
+2,877 source stereo pairs rendered and 2,877 first-L and 2,877
+first-R generations confirmed. `frame_id_gaps=0`,
+`pair_unpresented_discards=0`, `pair_update_skips=0`;
+0 GBM pressure and 0 dropped incoming sources.
+
+**Pacing:** `Stereo plan final` adjacent_compared=2875,
+exact=2872, mismatched=3, or **99.8957%** correct holds.
+No skipped intervals or source IDs in this matrix.
+Confirmed L durations: 1 cycle=1, 2 cycles=1436,
+3 cycles=1435, 4+ cycles=4 (the exceptional holds are
+concentrated around playback startup). The requested vs
+actual histogram has 1436 exact 2-cycle holds, 1434 exact
+3-cycle holds, one 2->3 and one 3->4+ (the remaining
+mismatch is an exact count inside the 4+ bucket).
+KMS plan hold: early_blocks=4280, due_promotions=2876,
+late_promotions=4, anchor_missing=0. Native-fence checks=2883,
+promotions=2876, deferrals=6, errors=0 (compared with 1,553
+deferrals on QUEUE2 alone).
+
+**Queue behavior:** second_enqueues=1410,
+second_promotions=1410, full_skips=0, gbm_skips=0,
+unexpected_incoming=0; pending and queued empty at shutdown.
+This is real prebuffering under the 2/3-cycle gate,
+not dropped producer draws. No progressive GBM backpressure
+appeared during the 120-second sample.
+
+**GPU work:** 179 periodic `kind=sample` probes;
+kernel fence age L mean=7.770ms and R mean=15.430ms
+after pair publication, R-L mean=7.659ms. The new
+policy does not remove sequential GPU completion latency,
+but it is no longer a visible source-generation loss.
+
+**Timing interpretation:** raw media-PTS vs physical scanout
+comparison has scanout span=119.986626s, movie PTS span=
+119.953000s; anchored last delta=+33.626ms, average=+95.381ms,
+max=+156.404ms. The 31-sample trace is ~154ms at 5 seconds
+after startup and ~47ms at ~115 seconds; the falling
+delta is largely the 23.976 fps media timeline compared
+against an almost exact 24.000 fps display-resample
+2/3-cycle cadence. Core logs explicitly confirm
+`Video sync mode enabled` and
+`swresample: 48056Hz ... -> 48000Hz`. Audio is
+being rate-corrected by mpv; **do not interpret this
+raw-PTS difference as measured A/V latency**, and do
+not feed uncorrected source media PTS into a new
+wallclock/MSC deadline gate. Absolute audio-to-photon
+delay was not observed in these logs.
+
+**Next:** before any media-PTS-aware gating, instrument or
+reuse the mpv core's *effective video/audio speed* and
+presentation clock anchor so a scheduler can compare
+corrected presentation deadlines with actual DRM UST,
+without fighting `--video-sync=display-resample`.
+Maintain current QUEUE2+HOLD as a validated opt-in
+reference. Perform a longer video run and pause/seek
+stress with audio to check non-steady-state behavior
+and perceived synchronization. Treat EOF-only atomic
+EINVAL on CRTC restoration separately from in-play
+`commit_errors=0`.
