@@ -120,6 +120,11 @@ struct stereo_kms {
     // Experimental one-slot priority rule: keep a ready pending pair
     // rather than discarding it when a newer movie frame is rendered.
     bool keep_ready_pending;
+    // eglSwapInterval is per EGL draw surface, not per display/context.
+    // The legacy stereo init sets interval 0 on the left surface only.
+    // Opt-in experiment: explicitly set the right surface to 0 too.
+    bool right_swap_interval_zero;
+    bool right_swap_interval_configured;
     // Diagnostic control: keep rendering new frames, but use only the
     // first complete pair for all KMS scanout flips.
     bool freeze_pair;
@@ -1264,6 +1269,28 @@ bool vo_drm_stereo_pair_begin_eye(struct ra_ctx *ctx, int eye)
         MP_ERR(ctx, "Cannot bind stereo eye %d EGL surface\n", eye);
         return false;
     }
+    if (eye == 1 && s->right_swap_interval_zero &&
+        !s->right_swap_interval_configured) {
+        // EGL 1.5: eglSwapInterval affects only the CURRENT draw surface.
+        // Our existing eglSwapInterval(display, 0) runs with LEFT current;
+        // the newly created RIGHT surface otherwise retains default 1.
+        // This is GL producer-only, performed once before the first R draw.
+        EGLint min_interval = -1, max_interval = -1;
+        bool min_known = eglGetConfigAttrib(p->egl.display, p->egl.config,
+                                             EGL_MIN_SWAP_INTERVAL, &min_interval);
+        bool max_known = eglGetConfigAttrib(p->egl.display, p->egl.config,
+                                             EGL_MAX_SWAP_INTERVAL, &max_interval);
+        if (!eglSwapInterval(p->egl.display, 0)) {
+            MP_ERR(ctx, "Stereo right EGL swap interval 0 failed: "
+                   "EGL error %#x\n", eglGetError());
+            return false;
+        }
+        s->right_swap_interval_configured = true;
+        MP_INFO(ctx, "Stereo right EGLSurface swap interval 0 applied; "
+                "EGLConfig min=%d max=%d (actual interval may be clamped)\n",
+                min_known ? min_interval : -1,
+                max_known ? max_interval : -1);
+    }
     s->capture_eye = eye;
     return true;
 }
@@ -1918,6 +1945,12 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     const char *protect_pending = getenv("MPV_DRM_STEREO_KEEP_READY_PENDING");
     p->stereo.keep_ready_pending = p->stereo.enabled && protect_pending &&
                                    strcmp(protect_pending, "1") == 0;
+    const char *right_swap_zero = getenv("MPV_DRM_STEREO_RIGHT_SWAP_INTERVAL_ZERO");
+    p->stereo.right_swap_interval_zero = p->stereo.enabled &&
+        right_swap_zero && strcmp(right_swap_zero, "1") == 0;
+    if (p->stereo.right_swap_interval_zero)
+        MP_INFO(ctx, "Stereo right EGLSurface swap interval 0 requested "
+                "(experimental; independent of KMS refresh timing)\n");
     const char *freeze_pair = getenv("MPV_DRM_STEREO_FREEZE_PAIR");
     p->stereo.freeze_pair = p->stereo.enabled && freeze_pair &&
                              strcmp(freeze_pair, "1") == 0;

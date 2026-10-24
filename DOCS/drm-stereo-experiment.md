@@ -4240,3 +4240,49 @@ a default without managing A/V delay, or grow a FIFO without accounting
 for per-eye GBM BO scarcity. Run more than one A/B trial to control
 thermal/frequency variance. Prefer to retain the independent KMS
 worker, which has achieved 0 physical misses across all four modes.
+
+
+### Experiment: per-surface EGL swap interval (after fixed-clock 120s baseline)
+
+The corrected native dma_fence clock test
+(`mpv-stereo-clockfix.log`, build `v0.41.0-dev-gf2d859ffd`)
+contained 179 samples. Mean kernel completion ages relative to producer
+pair publication: L=7.939ms and R=15.739ms; medians L=7.455ms and
+R=15.183ms. R-minus-L GPU completion delta mean 7.800ms,
+median 7.739ms, max 13.932ms. The ordinary-priority poll-thread
+detection lag over kernel signal time averaged 0.078ms (L) and
+0.091ms (R): these are genuine driver-recorded fence completion
+differences, not delayed userspace detection. Both CPU render and
+eglSwapBuffers for R are faster than L.
+
+In this baseline: 14,399 flips, zero physical misses, zero eye errors,
+zero in-play commit failures, 22 first-L frame_id gaps and 22 pending
+discards. 1,528 / 2,832 comparable planned-vs-actual hold intervals
+matched (54.0%). 1,335 native fence deferrals, zero fence errors.
+The usual post-shutdown DRM atomic EINVAL remains, separate from
+in-play errors.
+
+An initialization oversight is visible in the source:
+`eglSwapInterval(display, 0)` is only called with LEFT draw surface
+current. EGL 1.5 defines swap interval **per current draw surface**;
+the default for each new EGLSurface is 1, and the second RIGHT surface
+was created after the first one. An R completion ~one vblank later is
+compatible with implicit right-surface EGL swap throttling, but could
+also be driver-specific GPU queueing. No causal claim is made yet.
+
+`MPV_DRM_STEREO_RIGHT_SWAP_INTERVAL_ZERO=1` now requests interval=0
+on the RIGHT EGLSurface as soon as it becomes current for the first
+R draw. The existing LEFT setting remains unchanged, and the KMS
+worker and presentation pipeline are untouched. The producer logs
+whether EGL accepted the call and the EGLConfig advertised minimum
+and maximum swap interval. An EGL driver may silently clamp the
+requested interval. Default is OFF to retain direct A/B.
+
+Run baseline with this variable unset and an otherwise identical run
+with only this variable set, ideally using the same 120-second movie
+window. Compare `Stereo GPU probe` kernel L/R completion ages and
+R-L delta, L-boundary `fence_deferrals`, `frame_id_gaps`, MSC holds,
+and ensure `missed_vblanks`/parity/commit errors remain zero.
+Do not simultaneously enable `PLAN_HOLD`, `RENDER_WAKE_EYE`, or
+`KEEP_READY_PENDING`: their effects must remain independently
+identifiable.
