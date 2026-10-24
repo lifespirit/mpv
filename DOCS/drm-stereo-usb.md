@@ -726,3 +726,104 @@ locking rather than further guessing offsets.
 Do not claim an optical PASS, change KMS
 pacing, or apply arbitrary per-run compensation
 without lens/screen photodiode timing.
+
+
+## Causal test: does one extra full L/R movie hold improve optical phase?
+
+After four `NVSTUSB_EYE_TIMER_US=3500` optical runs, only run
+4 (subjectively closest to correct 3D) exhibited a one-cycle
+**movie-presentation** mismatch:
+`Stereo plan row: requested=2 actual_3=1` and
+`late_promotions=1`. The other three runs were
+`exact=477/477`; run 4 was `exact=476/477`.
+All four had `missed_vblanks=0`, `parity_errors=0`,
+`wrong_eye=0`, `skipped_msc=0`, and
+`confirmed=sent`. Run 4 had **no lost physical
+left/right flip and no lost USB shutter command**.
+Instead, a movie frame remained displayed for
+three complete L/R cycles instead of two
+(an extra 2 physical refreshes, ~16.67ms at
+120Hz). This is a *duration* error for one movie
+generation, not a 120Hz eye-parity error or a
+USB packet drop. In the four-run sample, the
+optical outcome and mismatch are correlated,
+but a direct causal mechanism has not been shown.
+
+To separate accidental startup/optical phase variation
+from an actual response to a repeated movie pair,
+the optional **`MPV_DRM_STEREO_TEST_EXTRA_HOLD_GEN`**
+environment variable intentionally postpones exactly
+one *eligible* generation promotion by a full L/R
+cycle. It is accepted only for native stereo with
+`PLAN_HOLD=1`; allowed generation 2..100000.
+If unset, no scheduling behavior changes.
+The 120Hz KMS worker still flips L,R,L,R and
+the USB bridge still emits one command on every
+confirmed physical flip. A test therefore
+reproduces one `requested=2,actual=3`-style
+presentation error **without** suppressing a
+physical KMS flip or resetting the USB firmware.
+
+Build the updated mpv repository and use a
+verified libnvstusb calibration .so (see preceding
+section). On a known, directly connected IR
+emitter, keep the same 3500us requested timer,
+same calibration clip, same display mode and
+same eye inversion for every launch.
+Use 4 paired runs: baseline, injection, baseline,
+injection, optionally test a later generation
+120 (~5 seconds). For example:
+
+```sh
+# Use the same command as the optical fixture run.
+NVSTUSB_EYE_TIMER_US=3500 \
+MPV_DRM_STEREO_TEST_EXTRA_HOLD_GEN=10 \
+MPV_DRM_STEREO_USB=1 \
+MPV_DRM_STEREO_USB_LIBRARY=/absolute/path/to/libnvstusb/src/.libs/libnvstusb.so \
+MPV_DRM_STEREO_USB_FIRMWARE=/absolute/path/to/libnvstusb/nvstusb.fw \
+  ./build/mpv --no-config --vo=gpu --gpu-context=drm \
+    --drm-connector=DP-1 --drm-mode=2560x1440@120 \
+    --drm-stereo-3d=yes --drm-vrr-enabled=no \
+    --video-sync=display-resample --no-audio --no-sub \
+    --log-file=/tmp/mpv-extra-lr-hold-gen10.log \
+    /tmp/drm-optical-sbs.mkv
+```
+
+Expected summary for injection, if the selected
+pending pair was ready at the due boundary:
+
+```text
+Stereo DIAGNOSTIC extra hold final: target_generation=10 injected=1 ...
+Stereo plan ... mismatched>=1 ...
+Stereo plan row: requested=2 ... actual_3=1 ...
+Stereo USB final: ... confirmed=<N> sent=<N> skipped_msc=0 ...
+```
+
+An injected hold for a generation whose planned
+duration was 3 will instead produce a 3->4
+interval. Check the *actual* plan row in every
+test. If `injected=0`, this specific run did
+not test the hypothesis; do not treat it as
+an injection success. The experiment is a
+video-timing perturbation, so it intentionally
+worsens the plan's exact-match statistics.
+
+Record the optical boundary position at the
+START and END of each run through a camera or
+photodiodes, including whether it moves over
+time. If a targeted extra full L/R cycle
+improves optical results **consistently** across
+independent randomized runs, it suggests an
+indirect influence worth instrumenting further.
+If not, focus on emitter/receiver acquisition
+phase. A full pair consists of one LEFT and
+one RIGHT flip, so it does not by itself
+change left/right parity or the within-8.33ms
+offset between each KMS callback and the
+corresponding USB command. It also cannot
+retroactively change the *first* USB command
+if injected at generation 10 or 120.
+
+This test is explicitly opt-in and must
+never become default movie playback behavior
+without a demonstrated optical mechanism.
