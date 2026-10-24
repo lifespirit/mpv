@@ -120,7 +120,7 @@ struct stereo_usb {
     bool invert_eyes;
     bool dry_run;
     bool timestamp_monotonic;
-    int init_status; // 1=sender ready; -1=dlopen; -2=symbols; -3=device; -4=rate
+    atomic_int init_status; // 1=ready; -1=dlopen; -2=symbols; -3=device; -4=rate
     char *firmware;
     char *library;
     float refresh_hz;
@@ -2172,7 +2172,7 @@ static void *stereo_usb_sender_thread(void *opaque)
         if (!lib && !u->library)
             lib = dlopen("libnvstusb.so", RTLD_NOW | RTLD_LOCAL);
         if (!lib) {
-            u->init_status = -1;
+            atomic_store_explicit(&u->init_status, -1, memory_order_release);
             MP_WARN(ctx, "Stereo USB: cannot load libnvstusb (%s); "
                     "video scanout continues without IR\n", dlerror());
             return NULL;
@@ -2185,7 +2185,7 @@ static void *stereo_usb_sender_thread(void *opaque)
         api.send_eye = dlsym(lib, "nvstusb_send_eye");
         if (!api.init || !api.deinit || !api.set_rate || !api.last_error ||
             !api.invert || !api.send_eye) {
-            u->init_status = -2;
+            atomic_store_explicit(&u->init_status, -2, memory_order_release);
             MP_WARN(ctx, "Stereo USB: incompatible libnvstusb; "
                     "nvstusb_send_eye and its support API are required\n");
             goto shutdown;
@@ -2194,7 +2194,7 @@ static void *stereo_usb_sender_thread(void *opaque)
         // execute only in this normal-priority thread.
         dev = api.init(u->firmware);
         if (!dev) {
-            u->init_status = -3;
+            atomic_store_explicit(&u->init_status, -3, memory_order_release);
             MP_WARN(ctx, "Stereo USB: emitter unavailable or firmware failed; "
                     "video scanout continues\n");
             goto shutdown;
@@ -2202,7 +2202,7 @@ static void *stereo_usb_sender_thread(void *opaque)
         api.set_rate(dev, u->refresh_hz);
         error = api.last_error(dev);
         if (error) {
-            u->init_status = -4;
+            atomic_store_explicit(&u->init_status, -4, memory_order_release);
             u->usb_errors++;
             u->usb_error_code = error;
             MP_WARN(ctx, "Stereo USB: emitter timing setup failed: %d\n", error);
@@ -2211,11 +2211,11 @@ static void *stereo_usb_sender_thread(void *opaque)
         if (u->invert_eyes)
             api.invert(dev);
     }
-    u->init_status = 1;
     MP_INFO(ctx, "Stereo USB: sender initialized at %.3fHz "
             "(dry_run=%d inverted=%d, confirmed KMS flip trigger, "
             "optical phase UNCALIBRATED)\n",
             u->refresh_hz, u->dry_run, u->invert_eyes);
+    atomic_store_explicit(&u->init_status, 1, memory_order_release);
 
     uint64_t last_word = 0;
     uint32_t last_msc = 0;
@@ -2317,22 +2317,25 @@ shutdown:
     return NULL;
 }
 
-static void stereo_usb_start(struct ra_ctx *ctx)
+// Called from drm_egl_init(), BEFORE any movie frame can start the KMS
+// worker. Synchronously gate the initial stereo display on emitter readiness,
+// but never do USB I/O or wait in the 120Hz KMS page-flip thread.
+static bool stereo_usb_start(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv;
     struct vo_drm_state *drm = ctx->vo->drm;
     const char *enabled = getenv("MPV_DRM_STEREO_USB");
     if (!enabled || strcmp(enabled, "0") == 0)
-        return;
+        return true;
     if (strcmp(enabled, "1") != 0) {
         MP_WARN(ctx, "Invalid MPV_DRM_STEREO_USB='%s' (expected 0 or 1)\n",
                 enabled);
-        return;
+        return true;
     }
     if (!drm->opts || !drm->opts->stereo_3d || !p->stereo.enabled) {
         MP_WARN(ctx, "Stereo USB: requires native --drm-stereo-3d=yes; "
                 "ignoring request\n");
-        return;
+        return true;
     }
     struct stereo_usb *u = &p->stereo.usb;
     u->ctx = ctx;
@@ -2349,6 +2352,7 @@ static void stereo_usb_start(struct ra_ctx *ctx)
     const char *dry_run = getenv("MPV_DRM_STEREO_USB_DRY_RUN");
     u->dry_run = dry_run && strcmp(dry_run, "1") == 0;
     atomic_init(&u->stop, false);
+    atomic_init(&u->init_status, 0);
     atomic_init(&u->mailbox_seq, 0);
     atomic_init(&u->mailbox_event, 0);
     atomic_init(&u->mailbox_ust_us, 0);
@@ -2357,22 +2361,66 @@ static void stereo_usb_start(struct ra_ctx *ctx)
     atomic_init(&u->wake_errors, 0);
     u->event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (u->event_fd < 0) {
-        MP_WARN(ctx, "Stereo USB: eventfd failed: %s\n", mp_strerror(errno));
-        return;
+        MP_ERR(ctx, "Stereo USB: eventfd failed: %s\n", mp_strerror(errno));
+        return false;
     }
     int err = pthread_create(&u->thread, NULL, stereo_usb_sender_thread, u);
     if (err) {
-        MP_WARN(ctx, "Stereo USB: cannot start sender thread: %s\n",
-                mp_strerror(err));
+        MP_ERR(ctx, "Stereo USB: cannot start sender thread: %s\n",
+               mp_strerror(err));
         close(u->event_fd);
-        return;
+        return false;
     }
     u->started = true;
+
+    // A real emitter may need firmware upload and USB re-enumeration.
+    // This bounded VO-init wait prevents the ~100 initial shutter commands
+    // previously lost while independent KMS already displayed L/R.
+    // Timeout affects readiness only: the uninit join must still wait for
+    // the USB worker to finish so its ctx/device cannot be freed in use.
+    int timeout_ms = 3000;
+    const char *timeout_env = getenv("MPV_DRM_STEREO_USB_INIT_TIMEOUT_MS");
+    if (timeout_env && *timeout_env) {
+        char *end = NULL;
+        errno = 0;
+        long value = strtol(timeout_env, &end, 10);
+        if (!errno && end != timeout_env && *end == '\0' &&
+            value >= 100 && value <= 10000) {
+            timeout_ms = value;
+        } else {
+            MP_WARN(ctx, "Invalid MPV_DRM_STEREO_USB_INIT_TIMEOUT_MS='%s' "
+                    "(valid range 100..10000; using 3000)\n", timeout_env);
+        }
+    }
+    int64_t started_ns = mp_time_ns();
+    const int64_t deadline_ns = started_ns + (int64_t)timeout_ms * 1000000LL;
+    int status;
+    while ((status = atomic_load_explicit(&u->init_status,
+                                           memory_order_acquire)) == 0 &&
+           mp_time_ns() < deadline_ns) {
+        struct timespec delay = {.tv_sec = 0, .tv_nsec = 10000000};
+        while (nanosleep(&delay, &delay) < 0 && errno == EINTR) {}
+    }
+    status = atomic_load_explicit(&u->init_status, memory_order_acquire);
+    if (status != 1) {
+        MP_ERR(ctx, "Stereo USB: emitter NOT ready before first stereo "
+               "scanout (status=%d timeout_ms=%d); aborting VO init "
+               "rather than displaying unpaired shutter stereo\n",
+               status, timeout_ms);
+        // drm_egl_uninit() will stop and join the sender before freeing
+        // the context. No KMS worker or movie frame has started yet.
+        return false;
+    }
+    MP_INFO(ctx, "Stereo USB: startup gate READY, took %.3fms "
+            "(timeout=%dms; physical KMS stereo can now begin)\n",
+            (mp_time_ns() - started_ns) / 1000000.0, timeout_ms);
+
     drm->stereo_usb_opaque = u;
     drm->stereo_usb_on_confirmed_flip = stereo_usb_confirm_flip;
     MP_WARN(ctx, "Stereo USB: EXPERIMENTAL %s bridge enabled; "
             "not phase calibrated. Do not wear glasses until "
             "optically validated\n", u->dry_run ? "DRY-RUN" : "IR");
+    return true;
 }
 
 static void stereo_usb_stop(struct ra_ctx *ctx)
@@ -2400,7 +2448,8 @@ static void stereo_usb_stop(struct ra_ctx *ctx)
             "last_usb_error=%d late_gt_2ms=%llu late_gt_period=%llu "
             "max_scanout_to_send_ms=%.3f max_usb_transfer_ms=%.3f "
             "(USB calls only, NOT optical sync)\n",
-            u->dry_run, u->init_status,
+            u->dry_run,
+            atomic_load_explicit(&u->init_status, memory_order_acquire),
             (unsigned long long)confirmed,
             (unsigned long long)u->sent,
             (unsigned long long)u->startup_skipped,
@@ -2776,7 +2825,8 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     ra_add_native_resource(ctx->ra, "drm_params_v2", &p->drm_params);
     ra_add_native_resource(ctx->ra, "drm_draw_surface_size", &p->draw_surface_size);
 
-    stereo_usb_start(ctx);
+    if (!stereo_usb_start(ctx))
+        goto err;
     return true;
 
 err:
