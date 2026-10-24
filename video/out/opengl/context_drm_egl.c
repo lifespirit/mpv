@@ -120,6 +120,9 @@ struct stereo_kms {
     // Experimental one-slot priority rule: keep a ready pending pair
     // rather than discarding it when a newer movie frame is rendered.
     bool keep_ready_pending;
+    bool two_slot_queue; // Experimental bounded two-entry FIFO.
+    uint64_t queue_second_enqueues, queue_second_promotions;
+    uint64_t queue_full_skips, queue_gbm_skips, queue_unexpected_incoming;
     // eglSwapInterval is per EGL draw surface, not per display/context.
     // The legacy stereo init sets interval 0 on the left surface only.
     // Opt-in experiment: explicitly set the right surface to 0 too.
@@ -151,7 +154,7 @@ struct stereo_kms {
     EGLSurface right_egl;
     int capture_eye;
     struct stereo_pair building;
-    struct stereo_pair active, pending;
+    struct stereo_pair active, pending, queued;
     struct stereo_pair retired[8];
     unsigned num_retired;
     uint64_t next_generation;
@@ -1041,7 +1044,15 @@ static void *stereo_kms_thread(void *arg)
                 }
                 old = s->active;
                 s->active = s->pending;
-                s->pending = (struct stereo_pair){0};
+                // Dequeue only after a successful L flip submission;
+                // old active BO is released after its KMS confirmation.
+                if (s->two_slot_queue && s->queued.bo[0]) {
+                    s->pending = s->queued;
+                    s->queued = (struct stereo_pair){0};
+                    s->queue_second_promotions++;
+                } else {
+                    s->pending = (struct stereo_pair){0};
+                }
             }
             drm->stereo_flip_eye = eye;
             drm->stereo_commit_target_valid = sequence_target_valid;
@@ -1603,6 +1614,18 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
                         s->keep_ready_pending,
                         (unsigned long long)drm->stereo_pair_kept_ready_pending,
                         (unsigned long long)drm->stereo_pair_dropped_newer_incoming);
+                MP_INFO(ctx, "Stereo two-slot queue final: "
+                        "enabled=%d second_enqueues=%llu "
+                        "second_promotions=%llu full_skips=%llu "
+                        "gbm_skips=%llu unexpected_incoming=%llu "
+                        "remaining_pending=%d remaining_queued=%d\n",
+                        s->two_slot_queue,
+                        (unsigned long long)s->queue_second_enqueues,
+                        (unsigned long long)s->queue_second_promotions,
+                        (unsigned long long)s->queue_full_skips,
+                        (unsigned long long)s->queue_gbm_skips,
+                        (unsigned long long)s->queue_unexpected_incoming,
+                        s->pending.bo[0] != NULL, s->queued.bo[0] != NULL);
                 MP_INFO(ctx, "Stereo plan hold final: enabled=%d "
                         "early_blocks=%llu due_promotions=%llu "
                         "late_promotions=%llu anchor_missing=%llu\n",
@@ -1757,6 +1780,7 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
         if (s->initialized) {
             stereo_release_pair(p, &s->building);
             stereo_release_pair(p, &s->pending);
+            stereo_release_pair(p, &s->queued);
             stereo_release_pair(p, &s->active);
             for (unsigned i = 0; i < s->num_retired; i++)
                 stereo_release_pair(p, &s->retired[i]);
@@ -1975,6 +1999,14 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     const char *protect_pending = getenv("MPV_DRM_STEREO_KEEP_READY_PENDING");
     p->stereo.keep_ready_pending = p->stereo.enabled && protect_pending &&
                                    strcmp(protect_pending, "1") == 0;
+    const char *two_slot_queue = getenv("MPV_DRM_STEREO_TWO_SLOT_QUEUE");
+    p->stereo.two_slot_queue = p->stereo.enabled && two_slot_queue &&
+                               strcmp(two_slot_queue, "1") == 0;
+    if (p->stereo.two_slot_queue) {
+        MP_INFO(ctx, "Stereo experimental two-slot pending FIFO enabled\n");
+        if (p->stereo.keep_ready_pending)
+            MP_WARN(ctx, "TWO_SLOT_QUEUE supersedes KEEP_READY_PENDING\n");
+    }
     const char *right_swap_zero = getenv("MPV_DRM_STEREO_RIGHT_SWAP_INTERVAL_ZERO");
     p->stereo.right_swap_interval_zero = p->stereo.enabled &&
         right_swap_zero && strcmp(right_swap_zero, "1") == 0;
