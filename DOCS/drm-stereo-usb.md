@@ -147,3 +147,63 @@ the actual page-flip callback.
 The successful 15-minute KMS test and 25-cycle EOF/idle test predate this
 opt-in USB bridge. They establish the video foundation, not glasses safety
 or optical sync.
+
+
+## Target i915 dry-run result: PASS (2026-10-25)
+
+Artifacts: `mpv-stereo-usb-1792878911-354350.log` and
+`mpv-stereo-usb-1792878911-354350.json`, produced using
+`TOOLS/drm_stereo_usb_smoke.py` in **dry-run**.
+Binary `v0.41.0-dev-g33be748f8`; i915 / Intel Iris Xe / Mesa 26.2.5,
+DP-1 2560x1440@119.998Hz; Half-SBS 23.976fps film
+starting at media time 295s. The process ran 15 seconds and
+exited 0 after successful EOF of the deliberately short `--length=15`
+playback. `MPV_DRM_STEREO_USB_DRY_RUN=1` meant no real
+`libnvstusb` library was loaded and no IR emitter or glasses were
+driven in this run.
+
+The dynamically selected native stereo policy was unchanged:
+`plan_hold=1 two_slot_queue=1 native_3d=1`.
+Sender initialization: `dry_run=1 init_status=1`, physical
+display refresh `119.998Hz`, `invert_eyes=0`.
+The driver reported monotonic DRM UST and KMS callback events.
+**KMS physical flips = 1812; USB mailbox confirmed = 1812;
+dry-run sender consumed = 1812 (100%)**. There was no
+mailbox-induced drop or scheduling stall:
+`skipped_msc=0 wake_errors=0 usb_errors=0
+late_gt_2ms=0 late_gt_period=0`.
+The maximum clock-monotonic interval from physical
+flip UST to **beginning** of simulated USB delivery was
+**0.480ms**; simulated transfer itself took `0.000ms`.
+Real USB bulk OUT time, firmware propagation, IR transmission
+and optical shutter phase **remain completely unmeasured**.
+The sub-0.5ms result only validates the software KMS-to-sender
+handoff on this host with no USB contention.
+
+Full stereo scanout KMS counters:
+`flips=1812 missed_vblanks=0 parity_errors=0
+wrong_eye=0 wrong_hold=0 commit_errors=0
+fence_errors=0 pair_unpresented_discards=0
+pair_update_skips=0 first_eye_L=358 first_eye_R=358`.
+`pair_renders=359 pair_gen=358`; 7 ordinary
+fence deferrals. `TWO_SLOT_QUEUE`: 158 second enqueues
+and 158 promotions, no full/GBM skips or unexpected incoming
+pairs; one pending pair at the pre-release shutdown
+snapshot is expected. Plan measured
+`adjacent_compared=355 exact=353 mismatched=2`
+(99.44%, including startup), one familiar initial
+frame-ID gap (37->39), no missed vblanks. The relative
+PTS `drift_last_ms=135.081` is a segment-relative
+video scanout/PTS metric influenced by startup delay,
+not audio-to-photon sync nor an optical phase measurement.
+
+**Disposition:** first target i915 software-only USB bridge
+integration smoke test PASS. No scheduler or video code
+change warranted by this log. Next controlled step:
+standalone `libnvstusb` test of the directly attached
+0955:0007 emitter; then one short mpv
+`--live-usb` run with measured USB bulk OUT latency,
+carefully inspect `sent/confirmed`, `skipped_msc`,
+`late_gt_period`, and `max_usb_transfer_ms`
+alongside unchanged KMS counters. Optical measurement
+is required before relying on the shutter image.
