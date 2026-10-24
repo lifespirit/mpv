@@ -1617,6 +1617,10 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
         if (drm->stereo_pair_mode && drm->stereo_flip_eye == 0)
             drm->stereo_last_left_ust_us = when_us;
         ++drm->stereo_flips;
+        if (drm->stereo_usb_on_confirmed_flip)
+            drm->stereo_usb_on_confirmed_flip(drm->stereo_usb_opaque,
+                                               drm->stereo_flip_eye, msc,
+                                               when_us);
 
         // Map the *actual confirmed* first LEFT scanout of each pair back
         // to the mpv vo_frame ID and movie PTS copied on atomic submit.

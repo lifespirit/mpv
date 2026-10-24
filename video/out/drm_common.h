@@ -210,6 +210,12 @@ struct vo_drm_state {
     bool vt_switcher_active;
     bool waiting_for_flip;
     struct drm_stereo_async_log *stereo_async_log;
+    // USB is an explicitly opt-in diagnostic. KMS invokes this lightweight
+    // notifier on a physically confirmed flip while holding stereo.mutex.
+    // The function only writes to a lock-free mailbox and nonblocking eventfd.
+    void (*stereo_usb_on_confirmed_flip)(void *opaque, int eye,
+                                         uint32_t msc, uint64_t ust_us);
+    void *stereo_usb_opaque;
 
     // Experimental opt-in SBS shutter-stereo diagnostics (no USB).
     // A submitted eye is tagged with the GBM buffer it belongs to.

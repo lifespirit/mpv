@@ -16,6 +16,7 @@
  */
 
 #include <assert.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -24,6 +25,8 @@
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
+#include <stdatomic.h>
+#include <sys/eventfd.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -106,6 +109,31 @@ struct stereo_pair {
     int64_t ready_ns;
 };
 
+// Opt-in NVIDIA 3D Vision diagnostic. The USB thread never owns GBM/DRM
+// objects and no synchronous libusb calls run on the 120Hz KMS worker.
+// A one-entry, versioned atomic mailbox keeps only the latest confirmed flip.
+struct stereo_usb {
+    struct ra_ctx *ctx;
+    pthread_t thread;
+    int event_fd;
+    bool started;
+    bool invert_eyes;
+    bool timestamp_monotonic;
+    char *firmware;
+    char *library;
+    float refresh_hz;
+    atomic_bool stop;
+    atomic_uint_fast64_t mailbox_seq;
+    atomic_uint_fast64_t mailbox_event;
+    atomic_uint_fast64_t mailbox_ust_us;
+    atomic_uint_fast64_t confirmed;
+    atomic_uint_fast64_t wake_errors;
+    // The sender alone updates these; read after pthread_join only.
+    uint64_t sent, skipped, late_2ms, late_period, usb_errors;
+    int usb_error_code;
+    double max_scanout_to_send_ms, max_usb_transfer_ms;
+};
+
 struct stereo_kms {
     bool enabled;
     bool sequence_mode;
@@ -122,6 +150,7 @@ struct stereo_kms {
     // rather than discarding it when a newer movie frame is rendered.
     bool keep_ready_pending;
     bool two_slot_queue; // Bounded FIFO: native stereo default, opt-out via env.
+    struct stereo_usb usb; // Optional IR bridge (disabled by default).
     uint64_t queue_second_enqueues, queue_second_promotions;
     uint64_t queue_full_skips, queue_gbm_skips, queue_unexpected_incoming;
     uint64_t queue_seek_resets, queue_seek_pending_flushes;
@@ -1683,6 +1712,7 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
         pthread_mutex_unlock(&s->mutex);
         if (s->started)
             pthread_join(s->thread, NULL);
+        stereo_usb_stop(ctx);
 
         // Print one final snapshot after the KMS worker has stopped, never
         // in the 120Hz page-flip callback. In particular, this preserves
@@ -2082,6 +2112,258 @@ static bool drm_egl_set_color(struct ra_ctx *ctx, struct mp_image_params *params
 // Do not alter ordinary DRM/2D output or legacy SBS/PAIR experiment defaults.
 // The production --drm-stereo-3d path enables these two policies by default.
 // Strict 0/1 overrides permit independently bisecting queue and hold behavior.
+// Confirmed-flip callback: fixed cost, nonblocking, no libusb or allocation.
+// The callback runs with stereo.mutex held by the KMS event thread.
+static void stereo_usb_confirm_flip(void *opaque, int eye, uint32_t msc,
+                                    uint64_t ust_us)
+{
+    struct stereo_usb *u = opaque;
+    if (atomic_load_explicit(&u->stop, memory_order_relaxed))
+        return;
+
+    // seq is even while the payload is complete; odd during an update.
+    // This avoids pairing an eye from one MSC with a UST from another.
+    atomic_fetch_add_explicit(&u->mailbox_seq, 1, memory_order_relaxed);
+    atomic_store_explicit(&u->mailbox_ust_us, ust_us, memory_order_relaxed);
+    atomic_store_explicit(&u->mailbox_event,
+                          (((uint64_t)msc << 1) | (unsigned)(eye & 1)) + 1,
+                          memory_order_relaxed);
+    atomic_fetch_add_explicit(&u->mailbox_seq, 1, memory_order_release);
+    atomic_fetch_add_explicit(&u->confirmed, 1, memory_order_relaxed);
+
+    uint64_t one = 1;
+    if (write(u->event_fd, &one, sizeof(one)) != sizeof(one))
+        atomic_fetch_add_explicit(&u->wake_errors, 1, memory_order_relaxed);
+}
+
+static void *stereo_usb_sender_thread(void *opaque)
+{
+    struct stereo_usb *u = opaque;
+    struct ra_ctx *ctx = u->ctx;
+    void *lib = dlopen(u->library ? u->library : "libnvstusb.so.0",
+                       RTLD_NOW | RTLD_LOCAL);
+    if (!lib && !u->library)
+        lib = dlopen("libnvstusb.so", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) {
+        MP_WARN(ctx, "Stereo USB: cannot load libnvstusb (%s); "
+                "video scanout continues without IR\n", dlerror());
+        return NULL;
+    }
+
+    struct nvstusb_api {
+        void *(*init)(const char *);
+        void (*deinit)(void *);
+        void (*set_rate)(void *, float);
+        int (*last_error)(void *);
+        void (*invert)(void *);
+        int (*send_eye)(void *, int);
+    } api = {
+        .init = dlsym(lib, "nvstusb_init"),
+        .deinit = dlsym(lib, "nvstusb_deinit"),
+        .set_rate = dlsym(lib, "nvstusb_set_rate"),
+        .last_error = dlsym(lib, "nvstusb_last_error"),
+        .invert = dlsym(lib, "nvstusb_invert_eyes"),
+        .send_eye = dlsym(lib, "nvstusb_send_eye"),
+    };
+    if (!api.init || !api.deinit || !api.set_rate || !api.last_error ||
+        !api.invert || !api.send_eye) {
+        MP_WARN(ctx, "Stereo USB: incompatible libnvstusb; "
+                "nvstusb_send_eye and its support API are required\n");
+        dlclose(lib);
+        return NULL;
+    }
+
+    // nvstusb_init() and set_rate() can upload firmware/re-enumerate USB.
+    // They execute solely in this normal-priority sender thread.
+    void *dev = api.init(u->firmware);
+    if (!dev) {
+        MP_WARN(ctx, "Stereo USB: emitter unavailable or firmware failed; "
+                "video scanout continues\n");
+        dlclose(lib);
+        return NULL;
+    }
+    api.set_rate(dev, u->refresh_hz);
+    int error = api.last_error(dev);
+    if (error) {
+        u->usb_errors++;
+        u->usb_error_code = error;
+        MP_WARN(ctx, "Stereo USB: emitter timing setup failed: %d\n", error);
+        goto close_usb;
+    }
+    if (u->invert_eyes)
+        api.invert(dev);
+    MP_INFO(ctx, "Stereo USB: emitter initialized at %.3fHz "
+            "(inverted=%d, confirmation-driven; optical phase UNCALIBRATED)\n",
+            u->refresh_hz, u->invert_eyes);
+
+    uint64_t last_word = 0;
+    uint32_t last_msc = 0;
+    bool have_msc = false;
+    while (!atomic_load_explicit(&u->stop, memory_order_acquire)) {
+        struct pollfd fd = {.fd = u->event_fd, .events = POLLIN};
+        int n = poll(&fd, 1, 100);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0 || (n > 0 && (fd.revents & (POLLERR | POLLNVAL))))
+            break;
+        if (n == 0)
+            continue;
+        uint64_t wake_count;
+        if (read(u->event_fd, &wake_count, sizeof(wake_count)) !=
+            sizeof(wake_count))
+            continue;
+        if (atomic_load_explicit(&u->stop, memory_order_acquire))
+            break;
+
+        uint64_t word = 0, ust_us = 0, seq1, seq2;
+        do {
+            seq1 = atomic_load_explicit(&u->mailbox_seq, memory_order_acquire);
+            if (seq1 & 1)
+                continue;
+            word = atomic_load_explicit(&u->mailbox_event, memory_order_relaxed);
+            ust_us = atomic_load_explicit(&u->mailbox_ust_us,
+                                          memory_order_relaxed);
+            seq2 = atomic_load_explicit(&u->mailbox_seq, memory_order_acquire);
+        } while ((seq1 & 1) || seq1 != seq2);
+        if (!word || word == last_word)
+            continue;
+        last_word = word;
+        uint64_t payload = word - 1;
+        uint32_t msc = (uint32_t)(payload >> 1);
+        int eye = (int)(payload & 1u);
+        if (have_msc) {
+            uint32_t diff = msc - last_msc;
+            if (diff > 1 && diff < 1000)
+                u->skipped += diff - 1;
+        }
+        last_msc = msc;
+        have_msc = true;
+
+        if (u->timestamp_monotonic) {
+            struct timespec ts;
+            if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+                int64_t start_us = (int64_t)ts.tv_sec * 1000000LL +
+                                    ts.tv_nsec / 1000;
+                double ms = (start_us - (int64_t)ust_us) / 1000.0;
+                if (ms > u->max_scanout_to_send_ms)
+                    u->max_scanout_to_send_ms = ms;
+                if (ms > 2.0)
+                    u->late_2ms++;
+                if (ms > 1000.0 / u->refresh_hz)
+                    u->late_period++;
+            }
+        }
+        struct timespec begin, end;
+        clock_gettime(CLOCK_MONOTONIC, &begin);
+        error = api.send_eye(dev, eye);
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        double usb_ms = (end.tv_sec - begin.tv_sec) * 1000.0 +
+                        (end.tv_nsec - begin.tv_nsec) / 1e6;
+        if (usb_ms > u->max_usb_transfer_ms)
+            u->max_usb_transfer_ms = usb_ms;
+        if (error) {
+            u->usb_errors++;
+            u->usb_error_code = error;
+            MP_WARN(ctx, "Stereo USB: eye command failed at MSC %u: %d; "
+                    "disabling USB, DRM/KMS playback unaffected\n",
+                    msc, error);
+            break;
+        }
+        u->sent++;
+    }
+
+close_usb:
+    api.deinit(dev);
+    dlclose(lib);
+    return NULL;
+}
+
+static void stereo_usb_start(struct ra_ctx *ctx)
+{
+    struct priv *p = ctx->priv;
+    struct vo_drm_state *drm = ctx->vo->drm;
+    const char *enabled = getenv("MPV_DRM_STEREO_USB");
+    if (!enabled || strcmp(enabled, "0") == 0)
+        return;
+    if (strcmp(enabled, "1") != 0) {
+        MP_WARN(ctx, "Invalid MPV_DRM_STEREO_USB='%s' (expected 0 or 1)\n",
+                enabled);
+        return;
+    }
+    if (!drm->opts || !drm->opts->stereo_3d || !p->stereo.enabled) {
+        MP_WARN(ctx, "Stereo USB: requires native --drm-stereo-3d=yes; "
+                "ignoring request\n");
+        return;
+    }
+    struct stereo_usb *u = &p->stereo.usb;
+    u->ctx = ctx;
+    u->timestamp_monotonic = drm->stereo_ust_monotonic;
+    u->refresh_hz = vo_drm_get_display_fps(drm); // PHYSICAL, not logical 60 Hz.
+    u->firmware = talloc_strdup(p, getenv("MPV_DRM_STEREO_USB_FIRMWARE")
+                                   ? getenv("MPV_DRM_STEREO_USB_FIRMWARE")
+                                   : "nvstusb.fw");
+    const char *library = getenv("MPV_DRM_STEREO_USB_LIBRARY");
+    if (library && *library)
+        u->library = talloc_strdup(p, library);
+    u->invert_eyes = getenv("MPV_DRM_STEREO_USB_INVERT_EYES") &&
+                     strcmp(getenv("MPV_DRM_STEREO_USB_INVERT_EYES"), "1") == 0;
+    atomic_init(&u->stop, false);
+    atomic_init(&u->mailbox_seq, 0);
+    atomic_init(&u->mailbox_event, 0);
+    atomic_init(&u->mailbox_ust_us, 0);
+    atomic_init(&u->confirmed, 0);
+    atomic_init(&u->wake_errors, 0);
+    u->event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (u->event_fd < 0) {
+        MP_WARN(ctx, "Stereo USB: eventfd failed: %s\n", mp_strerror(errno));
+        return;
+    }
+    int err = pthread_create(&u->thread, NULL, stereo_usb_sender_thread, u);
+    if (err) {
+        MP_WARN(ctx, "Stereo USB: cannot start sender thread: %s\n",
+                mp_strerror(err));
+        close(u->event_fd);
+        return;
+    }
+    u->started = true;
+    drm->stereo_usb_opaque = u;
+    drm->stereo_usb_on_confirmed_flip = stereo_usb_confirm_flip;
+    MP_WARN(ctx, "Stereo USB: EXPERIMENTAL IR bridge enabled, "
+            "not phase calibrated; observe through a camera/sensor "
+            "before wearing glasses\n");
+}
+
+static void stereo_usb_stop(struct ra_ctx *ctx)
+{
+    struct priv *p = ctx->priv;
+    if (!p || !p->stereo.usb.started)
+        return;
+    struct stereo_usb *u = &p->stereo.usb;
+    // Caller must first join the KMS worker; no further flip hooks can run.
+    struct vo_drm_state *drm = ctx->vo->drm;
+    drm->stereo_usb_on_confirmed_flip = NULL;
+    drm->stereo_usb_opaque = NULL;
+    atomic_store_explicit(&u->stop, true, memory_order_release);
+    uint64_t one = 1;
+    (void)write(u->event_fd, &one, sizeof(one));
+    pthread_join(u->thread, NULL);
+    close(u->event_fd);
+    MP_INFO(ctx, "Stereo USB final: confirmed=%llu sent=%llu "
+            "skipped_msc=%llu wake_errors=%llu usb_errors=%llu "
+            "last_usb_error=%d late_gt_2ms=%llu late_gt_period=%llu "
+            "max_scanout_to_send_ms=%.3f max_usb_transfer_ms=%.3f "
+            "(USB submissions only, NOT optical sync)\n",
+            (unsigned long long)atomic_load(&u->confirmed),
+            (unsigned long long)u->sent,
+            (unsigned long long)u->skipped,
+            (unsigned long long)atomic_load(&u->wake_errors),
+            (unsigned long long)u->usb_errors, u->usb_error_code,
+            (unsigned long long)u->late_2ms,
+            (unsigned long long)u->late_period,
+            u->max_scanout_to_send_ms, u->max_usb_transfer_ms);
+    u->started = false;
+}
+
 static bool stereo_env_policy(struct ra_ctx *ctx, const char *name,
                               bool enabled, bool default_on)
 {
@@ -2444,6 +2726,7 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     ra_add_native_resource(ctx->ra, "drm_params_v2", &p->drm_params);
     ra_add_native_resource(ctx->ra, "drm_draw_surface_size", &p->draw_surface_size);
 
+    stereo_usb_start(ctx);
     return true;
 
 err:
