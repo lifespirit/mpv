@@ -4170,3 +4170,73 @@ timestamp. The R-minus-L fence completion delta in the old
 logs was unaffected by this constant clock-epoch mismatch,
 but absolute kernel ages MUST be remeasured with the fixed code.
 This fix changes diagnostics only.
+
+
+### Four-way 120-second MSC presentation A/B (Oct 24 2026)
+
+Source: matched user test logs `mpv-stereo-{baseline,hold,wake,keep}.log`,
+all exact build `v0.41.0-dev-gdb237dc84` (before the kernel probe
+timebase correction), native `--drm-stereo-3d=yes`,
+`--drm-stereo-pacing-eye=right`, `--drm-stereo-stats=yes`,
+`--video-sync=display-resample`, DP1 2560x1440@120, VRR off,
+`--start=295 --length=120`. All ended normally. i915 card1,
+SCHED_FIFO priority 10 confirmed.
+
+| Metric | baseline | PLAN_HOLD=1 | RENDER_WAKE_EYE=left | KEEP_READY_PENDING=1 |
+|---|---:|---:|---:|---:|
+| physical flips | 14403 | 14405 | 14398 | 14399 |
+| missed_vblanks / wrong_eye / commit_errors | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 |
+| pair_renders | 2877 | 2877 | 2877 | 2876 |
+| confirmed first L | 2862 | 2846 | 2834 | 2866 |
+| frame_id_gaps | 15 | 31 | 43 | **11** |
+| unpresented pending discards | 15 | 31 | 43 | **0** |
+| newly rendered incoming pairs discarded by keep | 0 | 0 | 0 | 10 |
+| fence_deferrals | 1466 | 68 | 2953 | 310 |
+| actual hold: 1 / 2 / 3 / >=4 cycles | 294 / 1146 / 1087 / 334 | **0 / 1394 / 1412 / 39** | **0 / 1389 / 1400 / 44** | 89 / 1348 / 1315 / 113 |
+| requested-vs-actual exact / compared | 1517 / 2846 | **2794 / 2814** | 2734 / 2790 | 2416 / 2853 |
+| exact rate (comparable adjacent pairs only) | 53.3% | **99.3%** | 98.0% | 84.7% |
+| PTS relative drift last (ms) | +33.633 | +50.298 | -16.366 | -16.365 |
+
+`hold` almost eliminates incorrect hold lengths, but costs 31 source
+frames (vs 15 baseline). Its small `fence_deferrals=68` partly
+reflects deferring the *fence check itself* until the due MSC, not
+faster GPU completion: `early_blocks=2830`, `late_promotions=48`.
+`wake` also markedly regularizes 2/3-cycle cadence without a hold
+gate, but has the worst frame loss (43) and highest deferrals (2953).
+`keep` reduces source frame gaps to 11, but it explicitly throws away
+10 NEW incoming frames to preserve ready older pending pairs;
+zero `unpresented_discards` is **not** equivalent to zero frame loss.
+Its 84.7% exact rate is intermediate. `keep` also shows lower sampled
+CPU render times than the other sequential runs, indicating possible
+CPU/GPU frequency or scheduling confounding: repeat A/B before
+attributing the whole improvement to the policy.
+
+For each run, 179 asynchronous GPU probe events (every 16th pair)
+were recorded; none reported async queue loss. Typical per-pair
+CPU draw L/R means (ms): baseline 0.495/0.215; hold 0.524/0.217;
+wake 0.519/0.210; keep 0.286/0.102. Observed fence completion after
+pair publication averaged L about 8.0ms, R about 15.7ms. The reliable
+WITHIN-PAIR kernel timestamp difference R minus L has median about
+7.7ms in all modes; R is later despite quicker CPU draw and EGL swap.
+The original absolute `fence_kernel_{L,R}_age_ms` fields (~+1.2s)
+are INVALID because MONOTONIC kernel timestamps were compared directly
+to mpv's MONOTONIC_RAW-derived offset. Corrected in next commit
+`fd64ba3a`, but must be remeasured. A close-to-one-refresh R-minus-L
+delay suggests investigating GPU command completion cadence / EGL
+synchronization; the existing code already calls
+`eglSwapInterval(display, 0)` in stereo mode.
+
+All four normal shutdowns still yield a post-playback DRM atomic
+EINVAL; no in-play KMS commit errors. Relative PTS drift is anchored
+to each run's first first-L, **not** an absolute audio-to-photon delay.
+The exact-rate matrix excludes intervals containing missing source IDs:
+improved exactness can come with WORSE frame retention, as here.
+
+Suggested next path: fix and repeat native-fence timestamp diagnostics,
+investigate the ~7.7ms L-to-R GPU completion lag and the eligible
+left-boundary phase, and design a bounded **media-clock deadline**
+policy with an explicit late-drop decision. Do not enable PLAN_HOLD as
+a default without managing A/V delay, or grow a FIFO without accounting
+for per-eye GBM BO scarcity. Run more than one A/B trial to control
+thermal/frequency variance. Prefer to retain the independent KMS
+worker, which has achieved 0 physical misses across all four modes.
