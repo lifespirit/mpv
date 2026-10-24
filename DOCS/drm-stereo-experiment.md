@@ -1,5 +1,12 @@
 # Experimental DRM half-SBS frame-sequential output (no USB)
 
+> **Update (2026-10-25):** the native DRM-stereo video path remains usable
+> without any USB device or extra library. An **optional, disabled-by-default**
+> NVIDIA 3D Vision USB IR bridge has now been added for calibration experiments.
+> See [DRM stereo USB test and optical calibration](drm-stereo-usb.md).
+> This does not establish actual shutter optical phase or glasses safety.
+> Use the software-only dry-run before enabling real USB commands.
+
 > **Current native DRM-stereo defaults (2026-10-25):**
 > With `--drm-stereo-3d=yes`, `MPV_DRM_STEREO_TWO_SLOT_QUEUE`
 > and `MPV_DRM_STEREO_PLAN_HOLD` now **both default to enabled**.
