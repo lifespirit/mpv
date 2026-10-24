@@ -1649,6 +1649,20 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                         pts < drm->stereo_pts_last_media_pts - 0.100 ||
                         pts > drm->stereo_pts_last_media_pts + 5.0) {
                         reset = true;
+                    } else if (when_us > drm->stereo_pts_last_ust_us &&
+                               when_us - drm->stereo_pts_last_ust_us > 500000) {
+                        // The physical KMS worker continues alternating
+                        // L/R while mpv is paused. The next movie picture
+                        // must not inherit those idle cycles as its hold
+                        // or as a +N second "PTS drift" measurement.
+                        // Conservative threshold: 500ms, far longer
+                        // than an ordinary 2/3-cycle source hold.
+                        // Also covers a long playback stall without
+                        // asserting it was specifically a user pause.
+                        drm->stereo_pts_long_gap_resets++;
+                        drm->stereo_pts_long_gap_ust_us +=
+                            when_us - drm->stereo_pts_last_ust_us;
+                        reset = true;
                     } else {
                         uint32_t delta_msc = msc - drm->stereo_pts_last_msc;
                         bool valid_msc = delta_msc > 0 && delta_msc < 1000 &&

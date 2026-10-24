@@ -1705,7 +1705,9 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
                       drm->stereo_pts_valid_L : 0.0;
                 MP_INFO(ctx, "Stereo PTS final: "
                         "first_L_confirmed=%llu valid_pts=%llu missing_pts=%llu "
-                        "segments=%llu discontinuities=%llu frame_id_gaps=%llu "
+                        "segments=%llu discontinuities=%llu "
+                        "long_gap_resets=%llu long_gap_ust_s=%.3f "
+                        "frame_id_gaps=%llu "
                         "cycles_1=%llu cycles_2=%llu cycles_3=%llu cycles_4plus=%llu "
                         "scanout_span_s=%.6f movie_pts_span_s=%.6f "
                         "relative_drift_last_ms=%.3f relative_drift_avg_ms=%.3f "
@@ -1717,6 +1719,8 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
                         (unsigned long long)drm->stereo_pts_missing_L,
                         (unsigned long long)drm->stereo_pts_segments,
                         (unsigned long long)drm->stereo_pts_discontinuities,
+                        (unsigned long long)drm->stereo_pts_long_gap_resets,
+                        drm->stereo_pts_long_gap_ust_us / 1000000.0,
                         (unsigned long long)drm->stereo_pts_id_gaps,
                         (unsigned long long)drm->stereo_pts_cycles_1,
                         (unsigned long long)drm->stereo_pts_cycles_2,

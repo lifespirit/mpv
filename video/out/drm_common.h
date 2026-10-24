@@ -345,6 +345,9 @@ struct vo_drm_state {
     // First LEFT presentation telemetry (no per-frame KMS logging).
     uint64_t stereo_pts_first_L, stereo_pts_valid_L, stereo_pts_missing_L;
     uint64_t stereo_pts_segments, stereo_pts_discontinuities;
+    // Long wall-clock gaps between confirmed first-L source frames,
+    // typically pause/resume. Those gaps must not count as frame holds.
+    uint64_t stereo_pts_long_gap_resets, stereo_pts_long_gap_ust_us;
     uint64_t stereo_pts_id_gaps;
     uint64_t stereo_pts_cycles_1, stereo_pts_cycles_2;
     uint64_t stereo_pts_cycles_3, stereo_pts_cycles_4plus;
