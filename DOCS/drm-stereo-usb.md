@@ -207,3 +207,72 @@ carefully inspect `sent/confirmed`, `skipped_msc`,
 `late_gt_period`, and `max_usb_transfer_ms`
 alongside unchanged KMS counters. Optical measurement
 is required before relying on the shutter image.
+
+
+## First live USB emitter smoke test: USB transfer PASS, startup gap observed (2026-10-25)
+
+Artifacts: `mpv-stereo-usb-1792880121-358533.log` /
+`mpv-stereo-usb-1792880121-358533.json`. Binary
+`v0.41.0-dev-gc9812ac33`, Intel Iris Xe / i915 /
+Mesa 26.2.5, DP-1 2560x1440@120Hz, `--length=10`,
+real USB IR mode `dry_run=0`. mpv completed 10s playback
+successfully and exited 0. Emitter `init_status=1`,
+`usb_errors=0 wake_errors=0 last_usb_error=0`. No
+USB transfer failed; measured maximum `nvstusb_send_eye`
+duration was **0.350 ms**. One software wake began >2ms
+after KMS UST, max **7.415ms**, but
+`late_gt_period=0` (all measured software wakes within
+one physical 8.33ms period).
+
+**CRITICAL startup observation:** The KMS worker submitted
+its initial left-eye flip at log t=0.503s, but the
+USB emitter only became ready at t=1.371s: approximately
+0.868s of early playback with no shutter command. The
+final counters were `confirmed=1206 sent=1103`,
+a difference of **103 early flips**. The old
+`skipped_msc=0` did NOT count events overwritten in the
+single-entry mailbox before the FIRST command, and thus
+was misleading without inspecting logs. The time difference
+predicts ~104 physical 120Hz flips, consistent with 103
+missing submissions. There is no evidence of a sustained
+103-command loss after the sender became active, although
+the old telemetry cannot conclusively attribute every
+single missing command without a distinct startup counter.
+
+**Target KMS still clean:** `flips=1206
+missed_vblanks=0 parity_errors=0 wrong_eye=0 wrong_hold=0
+commit_errors=0 fence_errors=0
+pair_unpresented_discards=0 first_eye_L=238 first_eye_R=238`;
+two-slot `second_enqueues=108 second_promotions=108`,
+no skips. Presentation plan `exact=233/235`
+(99.15%, including startup).
+
+**Follow-up telemetry change** (commits after this run):
+add `startup_skipped` computed from the physical MSC of
+the first confirmed KMS callback vs the first USB-sender
+event; leave `skipped_msc` exclusively for skips
+BETWEEN successive sender commands. Also print
+`unaccounted = max(confirmed - sent - startup_skipped -
+skipped_msc, 0)` to expose shutdown races, init failures
+or otherwise unexplained differences. These fields are
+diagnostic: they do not change when USB or KMS commands
+are sent, and they do not fix initial readiness. The
+Python smoke test displays warnings for nonzero startup,
+steady-state or unaccounted drops. It also excludes
+`PLAN_HOLD=0|1` and `TWO_SLOT_QUEUE=0|1` textual
+override examples from the parsed policy, which previously
+polluted the JSON policy object with spurious
+uppercase `0` values.
+
+**Disposition:** standalone real USB bulk OUT and 10s
+nonblocking KMS coexistence PASS. This is NOT an
+end-to-end synchronized glasses PASS: the firmware ready
+time happens after video already starts, optical phase
+was not measured, and the trigger remains *after*
+confirmed scanout rather than predicting the next
+vblank. Before using the glasses, measure actual
+optical phase and decide whether the video start should
+be explicitly gated on USB ready with a bounded timeout
+or whether the sender should prime the firmware earlier.
+Never silently block the realtime KMS worker on USB
+initialization or synchronous OUT transfers.
