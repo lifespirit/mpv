@@ -4121,3 +4121,32 @@ holding the KMS scanout mutex or GBM buffers. Duplicate sync_file FDs
 are always closed on completion, failure or timeout. Default quiet mode
 records no probes. The existing async logger counts lost diagnostic
 events separately from video frames and page flips.
+
+
+
+### Optional early producer wake and pending preservation controls
+
+The baseline `--drm-stereo-pacing-eye` continues to determine mpv's
+logical presentation feedback. Experimental variable
+`MPV_DRM_STEREO_RENDER_WAKE_EYE=left|right` independently chooses
+which physical flip wakes the producer's `flip_page` wait. With
+`--drm-stereo-pacing-eye=right`, setting render wake to `left`
+offers the VO ~8.33ms additional lead time. This is **not** guaranteed
+to help: renderer may see the previous feedback cycle. Evaluate with
+matched tests and disable if audio/video drift or cadence worsens.
+Default render wake matches the configured pacing eye.
+
+`MPV_DRM_STEREO_KEEP_READY_PENDING=1` is a second, independent
+experiment that retains the previously published pending generation if
+both native GPU fences are signaled when a new generation arrives.
+It discards the newer incoming generation rather than the older ready
+one. This preserves display order and L/R safety, but does NOT guarantee
+fewer missing source frames or lower A/V latency. The shutdown
+`Stereo staging final` line distinguishes protected older pairs from
+discarded newer frames. Default is 0 (prior newest-pair-wins logic).
+Only one staging slot remains, and no GPU/KMS BO is freed while scanout
+owns it.
+
+Do not enable both experiments simultaneously for first A/B; isolate
+render wake phase and candidate retention effects. Neither changes
+physical KMS 120Hz or stereo eye parity.

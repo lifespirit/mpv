@@ -114,6 +114,12 @@ struct stereo_kms {
     bool legacy_mode;
     // Experimental frame-duration gate; defaults to disabled for A/B.
     bool plan_hold;
+    // Independent mpv VO wake edge; presentation feedback stays attached
+    // to the configured --drm-stereo-pacing-eye. Default is the same eye.
+    int render_wake_eye;
+    // Experimental one-slot priority rule: keep a ready pending pair
+    // rather than discarding it when a newer movie frame is rendered.
+    bool keep_ready_pending;
     // Diagnostic control: keep rendering new frames, but use only the
     // first complete pair for all KMS scanout flips.
     bool freeze_pair;
@@ -1103,10 +1109,13 @@ static void *stereo_kms_thread(void *arg)
                     // The VO advances once per full L/R cycle. By default
                     // pace it on L, but allow an opt-in R-edge experiment to
                     // shift the producer phase without changing eye parity.
+                    // VO wakeup may be an EARLIER edge than mpv's
+                    // presentation feedback, which remains unchanged in
+                    // drm_pflip_cb. Do not modify physical eye parity.
                     if (!drm->opts || !drm->opts->stereo_3d ||
-                        drm->stereo_flip_eye ==
-                            drm->opts->stereo_pacing_eye) {
+                        drm->stereo_flip_eye == s->render_wake_eye) {
                         s->confirmed_flips = drm->stereo_flips;
+                        drm->stereo_pair_render_wakes++;
                         pthread_cond_broadcast(&s->flip_ready);
                     }
                 }
@@ -1380,6 +1389,26 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
                 // Superseded staging pairs were never submitted to KMS.
                 // Do not release active or in-flight BOs here.
                 if (s->pending.bo[0]) {
+                    // Optional isolation test for the single pending slot:
+                    // retain an already-GPU-ready older generation until
+                    // the next eligible L rather than discard it merely
+                    // because the producer rendered a newer movie frame.
+                    // This trades one dropped incoming movie picture for
+                    // avoiding replacement of the older ready picture;
+                    // it MUST be evaluated against A/V latency and frame
+                    // pacing before becoming the default.
+                    bool protect = s->keep_ready_pending && s->native_fence &&
+                        stereo_debug_fence_ready(s->pending.fence_fd[0]) == 1 &&
+                        stereo_debug_fence_ready(s->pending.fence_fd[1]) == 1;
+                    if (protect) {
+                        drm->stereo_pair_kept_ready_pending++;
+                        drm->stereo_pair_dropped_newer_incoming++;
+                        stereo_release_pair(p, &s->building);
+                        s->building = (struct stereo_pair){0};
+                        drm->stereo_pair_rendered++;
+                        pthread_mutex_unlock(&s->mutex);
+                        return;
+                    }
                     stereo_note_unpresented_pair(ctx, "newer_generation");
                     stereo_release_pair(p, &s->pending);
                 }
@@ -1500,6 +1529,15 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
                     (unsigned long long)drm->stereo_commit_errors);
 
             if (drm->stereo_pair_mode) {
+                MP_INFO(ctx, "Stereo staging final: "
+                        "wake_eye=%c render_wakes=%llu "
+                        "protect_ready_pending=%d protected=%llu "
+                        "dropped_incoming=%llu\n",
+                        s->render_wake_eye ? 'R' : 'L',
+                        (unsigned long long)drm->stereo_pair_render_wakes,
+                        s->keep_ready_pending,
+                        (unsigned long long)drm->stereo_pair_kept_ready_pending,
+                        (unsigned long long)drm->stereo_pair_dropped_newer_incoming);
                 MP_INFO(ctx, "Stereo plan hold final: enabled=%d "
                         "early_blocks=%llu due_promotions=%llu "
                         "late_promotions=%llu anchor_missing=%llu\n",
@@ -1851,6 +1889,27 @@ static bool drm_egl_init(struct ra_ctx *ctx)
     drm->stereo_pair_plan_hold = p->stereo.plan_hold;
     if (p->stereo.plan_hold)
         MP_INFO(ctx, "Stereo planned-hold MSC gate enabled (experimental)\n");
+    p->stereo.render_wake_eye =
+        drm->opts ? drm->opts->stereo_pacing_eye : 0;
+    const char *render_wake = getenv("MPV_DRM_STEREO_RENDER_WAKE_EYE");
+    if (p->stereo.enabled && render_wake) {
+        if (strcmp(render_wake, "left") == 0)
+            p->stereo.render_wake_eye = 0;
+        else if (strcmp(render_wake, "right") == 0)
+            p->stereo.render_wake_eye = 1;
+        else
+            MP_WARN(ctx, "Invalid MPV_DRM_STEREO_RENDER_WAKE_EYE='%s' "
+                    "(expected left or right; unchanged)\n", render_wake);
+    }
+    if (p->stereo.enabled && drm->opts && drm->opts->stereo_3d &&
+        p->stereo.render_wake_eye != drm->opts->stereo_pacing_eye)
+        MP_INFO(ctx, "Stereo experimental early VO wake on %c; "
+                "mpv presentation feedback remains on %c\n",
+                p->stereo.render_wake_eye ? 'R' : 'L',
+                drm->opts->stereo_pacing_eye ? 'R' : 'L');
+    const char *protect_pending = getenv("MPV_DRM_STEREO_KEEP_READY_PENDING");
+    p->stereo.keep_ready_pending = p->stereo.enabled && protect_pending &&
+                                   strcmp(protect_pending, "1") == 0;
     const char *freeze_pair = getenv("MPV_DRM_STEREO_FREEZE_PAIR");
     p->stereo.freeze_pair = p->stereo.enabled && freeze_pair &&
                              strcmp(freeze_pair, "1") == 0;

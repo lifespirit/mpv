@@ -297,6 +297,9 @@ struct vo_drm_state {
     uint64_t stereo_pair_plan_due_promotions;
     uint64_t stereo_pair_plan_late_promotions;
     uint64_t stereo_pair_plan_anchor_missing;
+    uint64_t stereo_pair_kept_ready_pending;
+    uint64_t stereo_pair_dropped_newer_incoming;
+    uint64_t stereo_pair_render_wakes;
     uint64_t stereo_pair_gpu_waits;
     int64_t stereo_max_gpu_wait_ns;
     // Optional EGL native sync_file FD readiness checks before new pairs
