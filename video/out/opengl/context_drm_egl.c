@@ -1227,10 +1227,31 @@ bool vo_drm_stereo_pair_can_capture(struct ra_ctx *ctx)
     if (!s->enabled || !s->initialized)
         return false;
     stereo_drain_retired(ctx);
+    // Bounded two-slot FIFO: do not destroy an accepted frame to
+    // create GBM room for a later picture. Rendering skips admission
+    // if both slots are taken, rather than stalling the 120 Hz worker.
+    if (s->two_slot_queue) {
+        pthread_mutex_lock(&s->mutex);
+        bool full = s->pending.bo[0] && s->queued.bo[0];
+        if (full) {
+            s->queue_full_skips++;
+            ctx->vo->drm->stereo_pair_update_skips++;
+        }
+        pthread_mutex_unlock(&s->mutex);
+        if (full)
+            return false;
+    }
     bool available = gbm_surface_has_free_buffers(p->gbm.surface) &&
                      gbm_surface_has_free_buffers(s->right_gbm);
     if (!available) {
         pthread_mutex_lock(&s->mutex);
+        if (s->two_slot_queue) {
+            // Skipped incoming frame, without evicting pending or queued.
+            s->queue_gbm_skips++;
+            ctx->vo->drm->stereo_pair_update_skips++;
+            pthread_mutex_unlock(&s->mutex);
+            return false;
+        }
         // A prior partial capture is never eligible for scanout.
         if (s->building.bo[0] || s->building.bo[1])
             stereo_release_pair(p, &s->building);
@@ -1457,6 +1478,20 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
             }
             if (!s->active.bo[0]) {
                 s->active = s->building;
+            } else if (s->two_slot_queue) {
+                if (!s->pending.bo[0]) {
+                    s->pending = s->building;
+                } else if (!s->queued.bo[0]) {
+                    // The old pending pair becomes GPU ready soon after a
+                    // missed L boundary; retain it until the next L edge.
+                    s->queued = s->building;
+                    s->queue_second_enqueues++;
+                } else {
+                    // Should be unreachable: can_capture() refuses a
+                    // full queue. Never overwrite accepted generations.
+                    s->queue_unexpected_incoming++;
+                    overwritten = s->building;
+                }
             } else {
                 // Superseded staging pairs were never submitted to KMS.
                 // Do not release active or in-flight BOs here.
