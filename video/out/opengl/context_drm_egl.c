@@ -120,7 +120,7 @@ struct stereo_usb {
     bool invert_eyes;
     bool dry_run;
     bool timestamp_monotonic;
-    atomic_int init_status; // 1=ready; -1=dlopen; -2=symbols; -3=device; -4=rate
+    atomic_int init_status; // 1=ready; -1=dlopen; -2=symbols; -3=device; -4=rate; -5=timer mismatch
     char *firmware;
     char *library;
     float refresh_hz;
@@ -2163,6 +2163,7 @@ static void *stereo_usb_sender_thread(void *opaque)
         void *(*init)(const char *);
         void (*deinit)(void *);
         void (*set_rate)(void *, float);
+        int (*effective_timer_us)(void *); // Optional diagnostic API.
         int (*last_error)(void *);
         void (*invert)(void *);
         int (*send_eye)(void *, int);
@@ -2182,6 +2183,7 @@ static void *stereo_usb_sender_thread(void *opaque)
         api.init = dlsym(lib, "nvstusb_init");
         api.deinit = dlsym(lib, "nvstusb_deinit");
         api.set_rate = dlsym(lib, "nvstusb_set_rate");
+        api.effective_timer_us = dlsym(lib, "nvstusb_effective_eye_timer_us");
         api.last_error = dlsym(lib, "nvstusb_last_error");
         api.invert = dlsym(lib, "nvstusb_invert_eyes");
         api.send_eye = dlsym(lib, "nvstusb_send_eye");
@@ -2209,6 +2211,41 @@ static void *stereo_usb_sender_thread(void *opaque)
             u->usb_error_code = error;
             MP_WARN(ctx, "Stereo USB: emitter timing setup failed: %d\n", error);
             goto shutdown;
+        }
+        // A request for a nonstandard firmware timer is only meaningful if
+        // we can prove that the loaded .so actually applied it. This prevents
+        // misleading optical tests using an older libnvstusb from LD paths.
+        const char *timer_env = getenv("NVSTUSB_EYE_TIMER_US");
+        if (timer_env && *timer_env) {
+            char *end = NULL;
+            errno = 0;
+            long requested = strtol(timer_env, &end, 10);
+            if (errno || end == timer_env || *end != '\0' ||
+                requested < 500 || requested > 10000 ||
+                !api.effective_timer_us) {
+                atomic_store_explicit(&u->init_status, -5,
+                                      memory_order_release);
+                MP_ERR(ctx, "Stereo USB: cannot verify requested firmware "
+                       "eye timer '%s' (need libnvstusb calibration "
+                       "API); aborting optical test\n", timer_env);
+                goto shutdown;
+            }
+            int effective = api.effective_timer_us(dev);
+            if (effective != requested) {
+                atomic_store_explicit(&u->init_status, -5,
+                                      memory_order_release);
+                MP_ERR(ctx, "Stereo USB: requested eye timer=%ld us but "
+                       "loaded library reports %d us; aborting test\n",
+                       requested, effective);
+                goto shutdown;
+            }
+            MP_INFO(ctx, "Stereo USB: verified firmware eye timer=%d us "
+                    "(requested=%ld, phase NOT optically calibrated)\n",
+                    effective, requested);
+        } else if (api.effective_timer_us) {
+            MP_INFO(ctx, "Stereo USB: default firmware eye timer=%d us "
+                    "(effective library setting)\n",
+                    api.effective_timer_us(dev));
         }
         if (u->invert_eyes)
             api.invert(dev);
