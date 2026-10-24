@@ -437,3 +437,44 @@ render-pair generation ID. The monitor's `119.998 Hz` is not
 `120.000 Hz` and should also be the eventual timing reference for
 the USB/IR emitter. **No new independent scheduler is implemented
 yet; this is a design note based on the experimental runs.**
+
+## Seventh checkpoint: per-stage CPU pipeline timing (NO USB)
+
+Branch: `feature/drm-stereo-pipeline-timing`. This is instrumentation only;
+it does not change the scanout algorithm or connect the NVIDIA USB emitter.
+Run the exact same 120 Hz TTY test as above with `--swapchain-depth=3`
+and `MPV_DRM_STEREO_SLOT=1`. Capture at least 90 seconds.
+
+Every 120 confirmed KMS page flips now include these peak (not average)
+CPU-side durations, in milliseconds, reset at the end of the window:
+
+| Field | Measures |
+| --- | --- |
+| `pipeline_render_ms` | Wall time in `gl_video_render_frame()` |
+| `pipeline_egl_ms` | Wall time spent in `eglSwapBuffers()` |
+| `pipeline_gbm_lock_ms` | Wall time spent in `gbm_surface_lock_front_buffer()` |
+| `pipeline_wait_ms` | Wall time spent waiting for a KMS page-flip callback |
+| `pipeline_atomic_ms` | Wall time inside `drmModeAtomicCommit()` |
+| `pipeline_swap_ms` | Total wall time in the DRM EGL `swap_buffers` function |
+| `window_wait_calls` | Number of explicit KMS callback waits in the report window |
+
+These values are a first triage signal only. In particular,
+`pipeline_render_ms` does **not** measure GPU completion time; GL can
+queue asynchronous work. A large `pipeline_egl_ms` or
+`pipeline_gbm_lock_ms` may be back-pressure from that GPU work.
+`pipeline_wait_ms` includes ordinary vblank waiting and CPU
+event-dispatch delay, not just pathological blocking.
+
+Compare 3 runs of the same film, with unchanged options, as follows:
+
+1. Existing MSC-slot mode, depth 3.
+2. Existing MSC-slot mode, depth 5.
+3. Legacy recovery mode (`MPV_DRM_STEREO_SLOT=0`,
+   `MPV_DRM_STEREO_RECOVER=1`), depth 3.
+
+Look at the new metrics **in the same report window** as
+`window_missed`, `window_wrong_eye`, `window_target_misses` and
+`max_commit_callback_ms`. If misses occur without any exceptional
+render/GL/GBM/atomic CPU time, the next task is independent, cached
+two-eye KMS scanout. More GBM queue depth alone cannot schedule a
+refresh when mpv does not invoke the output backend.
