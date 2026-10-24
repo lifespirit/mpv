@@ -26,6 +26,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
+#include <sys/stat.h>
 #include <sys/eventfd.h>
 #include <time.h>
 #include <unistd.h>
@@ -116,6 +117,10 @@ struct stereo_usb {
     struct ra_ctx *ctx;
     pthread_t thread;
     int event_fd;
+    int control_fd;
+    char *control_path;
+    uint64_t control_updates, control_errors;
+    int final_eye_timer_us;
     bool started;
     bool invert_eyes;
     bool dry_run;
@@ -2164,6 +2169,7 @@ static void *stereo_usb_sender_thread(void *opaque)
         void (*deinit)(void *);
         void (*set_rate)(void *, float);
         int (*effective_timer_us)(void *); // Optional diagnostic API.
+        int (*set_eye_timer_us)(void *, int); // Optional runtime calibration.
         int (*last_error)(void *);
         void (*invert)(void *);
         int (*send_eye)(void *, int);
@@ -2184,6 +2190,7 @@ static void *stereo_usb_sender_thread(void *opaque)
         api.deinit = dlsym(lib, "nvstusb_deinit");
         api.set_rate = dlsym(lib, "nvstusb_set_rate");
         api.effective_timer_us = dlsym(lib, "nvstusb_effective_eye_timer_us");
+        api.set_eye_timer_us = dlsym(lib, "nvstusb_set_eye_timer_us");
         api.last_error = dlsym(lib, "nvstusb_last_error");
         api.invert = dlsym(lib, "nvstusb_invert_eyes");
         api.send_eye = dlsym(lib, "nvstusb_send_eye");
@@ -2247,6 +2254,17 @@ static void *stereo_usb_sender_thread(void *opaque)
                     "(effective library setting)\n",
                     api.effective_timer_us(dev));
         }
+        if (u->control_fd >= 0 &&
+            (!api.effective_timer_us || !api.set_eye_timer_us)) {
+            atomic_store_explicit(&u->init_status, -6,
+                                  memory_order_release);
+            MP_ERR(ctx, "Stereo USB: live calibration requires a rebuilt "
+                   "libnvstusb with effective_eye_timer_us and "
+                   "set_eye_timer_us; refusing VO startup\n");
+            goto shutdown;
+        }
+        if (api.effective_timer_us)
+            u->final_eye_timer_us = api.effective_timer_us(dev);
         if (u->invert_eyes)
             api.invert(dev);
     }
