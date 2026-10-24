@@ -100,7 +100,9 @@ def main():
     policy = re.findall(r"Stereo scheduling policy:[^\n]*", content)
     usb_values = counters(usb[-1]) if usb else {}
     kms_values = counters(kms[-1]) if kms else {}
-    policy_values = counters(policy[-1]) if policy else {}
+    # Drop the textual override examples ("PLAN_HOLD=0|1"), which are not
+    # current setting values. Only the leading actual policy is meaningful.
+    policy_values = counters(policy[-1].split("; overrides:")[0]) if policy else {}
 
     errors = []
     if rc != 0 or timed_out:
@@ -127,10 +129,12 @@ def main():
         if kms_values.get(field, 1) != 0:
             errors.append("KMS " + field + " nonzero")
 
-    # Skipped MSC and late commands are important warnings even when
-    # video KMS itself is perfectly healthy.
+    # Startup USB firmware configuration often runs concurrently with
+    # playback. Report those unsent flips separately from steady-state loss.
+    # Neither count is a KMS flip error; both matter for shutter startup.
     warnings = []
-    for field in ("skipped_msc", "late_gt_period"):
+    for field in ("startup_skipped", "skipped_msc", "unaccounted",
+                  "late_gt_period"):
         if usb_values.get(field, 0) > 0:
             warnings.append("USB " + field + "=" + str(usb_values[field]))
     data = {
@@ -147,7 +151,9 @@ def main():
     print("Summary:", summary_path)
     print("KMS flips:", kms_values.get("flips"), "USB confirmed:",
           usb_values.get("confirmed"), "sent:", usb_values.get("sent"))
-    print("USB MSC skips:", usb_values.get("skipped_msc"),
+    print("USB startup skips:", usb_values.get("startup_skipped"),
+          "steady-state MSC skips:", usb_values.get("skipped_msc"),
+          "unaccounted:", usb_values.get("unaccounted"),
           "late periods:", usb_values.get("late_gt_period"))
     for warning in warnings:
         print("WARNING:", warning)
