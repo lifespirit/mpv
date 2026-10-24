@@ -4575,3 +4575,86 @@ stress with audio to check non-steady-state behavior
 and perceived synchronization. Treat EOF-only atomic
 EINVAL on CRTC restoration separately from in-play
 `commit_errors=0`.
+
+
+### 15-minute continuous hold + two-slot stability run (2026-10-24)
+
+Input: `mpv-stereo-queue2-hold15.log`,
+`v0.41.0-dev-gc51dfaddc`, native Intel i915/Mesa 26.2.5,
+DP-1 2560x1440@120, 23.976 Half-SBS H.264, from media PTS 0
+(`--length=900`, no `--start`), with
+`--video-sync=display-resample`, right-eye VO pacing and
+`MPV_DRM_STEREO_TWO_SLOT_QUEUE=1` +
+`MPV_DRM_STEREO_PLAN_HOLD=1`.
+This was continuous playback; no pause or seek was exercised.
+
+**Preservation and physical correctness:** 21,578 render pairs and
+21,578 confirmed FIRST-L source generations, 21,577 FIRST-R
+generations at test cutoff (one last L without an R before stop),
+`frame_id_gaps=0`, `pair_unpresented_discards=0`,
+`pair_update_skips=0`, `missed_vblanks=0`, `parity_errors=0`,
+`wrong_eye=0`, `wrong_hold=0`, `commit_errors=0`.
+107,907 physical flips, all `max_gap=1` in the 899 1-second
+physical scanout reports. The single final `Failed to commit
+atomic request: Error number 22` is after the end-of-run
+stats at 899.624s, during shutdown restoration; it is not
+an in-play KMS flip error.
+
+**Queue and scheduling:** all 10,781 second-slot enqueues became
+second-slot promotions; `full_skips=0 gbm_skips=0
+unexpected_incoming=0 remaining_pending=0 remaining_queued=0`.
+Only SIX GPU fence deferrals over ~21.6k generations.
+`PLAN_HOLD`: `early_blocks=32354 due_promotions=21577
+late_promotions=4`.
+Exact previous requested hold vs actual physical L-cycle interval
+was 21,572/21,576 = **99.98146%**; 4 mismatches,
+`abs_error_cycles=5`, `signed_error_cycles=1`;
+no skipped IDs or invalid MSC. Actual duration histogram
+for adjacent first-L generation changes:
+`cycles_1=0, cycles_2=10787, cycles_3=10785, cycles_4plus=5`.
+The source rate of 23.976 frames/sec is locked to
+alternating 2/3 stereo cycles at a physical 120Hz display
+(~24 frames/sec after display-resample).
+
+**GPU signal latency stable:** 1,348 `kind=sample` GPU probes
+(once per 16 pairs), no lost-pair probe events.
+Mean L kernel fence age=8.057ms, R=15.857ms,
+R-L=7.800ms; the medians are 7.572ms, 15.244ms,
+and 7.734ms, respectively. Splitting into three 5-minute
+blocks gives R-L mean 7.881 / 7.709 / 7.811 ms, indicating
+no progressive GPU latency issue.
+
+**Important diagnostic clock-domain and resampling insight:**
+`Stereo PTS final` reports scanout_span=899.241387s,
+movie_pts_span=899.941000s, last raw drift=-699.613ms,
+min drift=-707.951ms and max=+174.693ms.
+This compares *unadjusted media PTS* against physical UST.
+It is NOT absolute A/V sync or an accumulating rendering lag.
+After initial ~5sec startup transient, sparse PTS/UST samples
+follow the precise fitted line
+`raw_relative_drift_ms = 175.466 - 0.972512 * elapsed_ust_s`;
+maximum absolute residual on these regular snapshots after 10sec
+is only **0.024ms**. Independently, the hardware MSC-to-UST
+measurements give actual refresh **119.996702Hz**; five refreshes
+per frame yield 23.999340 delivered pictures/s.
+Compared with source `24000/1001` frames/s, the expected
+raw drift slope is about **-0.972ms/s**, matching the trace
+slope almost exactly. mpv logged `Video sync mode enabled`
+and `swresample 48056Hz -> 48000Hz`, confirming that
+audio time stretching/resampling is active. DO NOT
+interpret -700ms raw drift as -700ms A/V desync, nor
+apply a naive source-media-PTS correction in KMS.
+Actual audio-to-photon offset is not observable in these
+records; measuring it would require an audio clock anchor,
+timestamped samples or independent perceptual/physical test.
+
+Consequence: QUEUE2 + PLAN_HOLD passed 15-minute continuous
+stress without missing source frames, incorrect eye order,
+physical vblank loss or GBM pressure, at 99.98% duration
+agreement. Preserve this as the reference implementation
+and do not replace mpv's existing display-resample clock
+with raw media PTS. Next independent validation should
+exercise pause/resume, seeks, speed changes, file ending,
+and real audio/video synchronization before enabling the
+two options by default. No evidence here warrants a
+new PTS/MSC correction feedback loop.
