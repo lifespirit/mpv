@@ -4041,3 +4041,33 @@ the existing mpv frame lifecycle and cross-file metadata
 transfer, but **has not been compiled or run on the target Arch
 machine yet**. A quick launch check of `Stereo plan final`
 and `Stereo plan row` lines is worthwhile before full A/B.
+
+
+### Async stereo diagnostic ring (experimental, no USB)
+
+Branch: `feature/drm-stereo-async-logging` based on the current
+`feature/drm-stereo-dual-scanout` implementation. Only diagnostics change;
+the independent 120Hz KMS scanout, pre-rendered L/R pair management and GPU
+fences are unchanged.
+
+The periodic `DRM SBS test` reports, `DRM SBS gap` warnings and sampled
+`Stereo unpresented pair discarded` messages are now immutable events
+queued with `pthread_mutex_trylock` into a bounded 16-entry ring. Formatting,
+mpv logging and TTY/file writes happen in a normal-priority consumer thread.
+There are no blocking logger locks, allocations or writes on the KMS callback
+path. A full/contended ring discards diagnostic events, **never frames**.
+The final shutdown message reports the count of discarded log events.
+
+`--drm-stereo-stats=no` continues to suppress periodic reports and sampled
+producer drops; KMS gap warnings remain enabled, but asynchronous. Final
+`Stereo DRM final`, `Stereo PTS final` and plan reports remain synchronous
+after joining the KMS thread. Infrequent non-stereo log messages elsewhere in
+mpv are not changed by this patch.
+
+For A/B, replay the same 120-second Half-SBS segment with
+`--drm-stereo-stats=yes` and `--drm-stereo-stats=no`, the same 120Hz mode,
+the same pacing eye and GPU-fence settings. Compare physical
+`missed_vblanks`, confirmed wrong-eye events, source frame-ID gaps and
+aggregate final statistics. Do not mistake a dropped *diagnostic event*
+for a dropped display refresh. This source patch requires a local build
+and hardware validation.

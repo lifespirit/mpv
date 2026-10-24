@@ -632,7 +632,7 @@ static int stereo_debug_fence_ready(int fd)
 
 // Called on the GL producer thread with stereo.mutex held, immediately
 // before a pending pair that never reached KMS is discarded.
-// First 40 events are logged; thereafter one in 100 to avoid log storms.
+// First 40 events are queued; thereafter one in 100 to avoid log storms.
 static void stereo_note_unpresented_pair(struct ra_ctx *ctx,
                                          const char *reason)
 {
@@ -663,7 +663,7 @@ static void stereo_note_unpresented_pair(struct ra_ctx *ctx,
         }
     }
     // This function runs on the producer while stereo.mutex is held.
-    // Writing a logfile here can starve the 120Hz SCHED_FIFO KMS worker.
+    // Never print from here: only publish through the trylock-only ring.
     // In quiet mode keep the exact discard count (and later frame_id_gaps)
     // but do not poll fences, format, or log individual drop records.
     // The final snapshot is emitted after the worker has been joined.
@@ -678,34 +678,29 @@ static void stereo_note_unpresented_pair(struct ra_ctx *ctx,
         ? stereo_debug_fence_ready(pair->fence_fd[0]) : -1;
     int right = s->native_fence
         ? stereo_debug_fence_ready(pair->fence_fd[1]) : -1;
-    MP_INFO(ctx, "Stereo unpresented pair discarded: "
-            "reason=%s count=%llu pending_gen=%llu active_gen=%llu "
-            "frame_id=%llu movie_pts_s=%.6f pts_valid=%d "
-            "pending_age_ms=%.3f fence_L=%d fence_R=%d "
-            "left_boundary_fence_deferrals=%u "
-            "first_deferral_age_ms=%.3f last_deferral_age_ms=%.3f "
-            "last_deferral_target_msc=%u "
-            "intermediate_R_probe_age_ms=%.3f intermediate_R_probe_msc=%u "
-            "intermediate_R_fence_L=%d intermediate_R_fence_R=%d "
-            "(fence: 1=signaled 0=unsignaled -1=unavailable)\n",
-            reason, (unsigned long long)count,
-            (unsigned long long)pair->generation,
-            (unsigned long long)s->active.generation,
-            (unsigned long long)pair->frame_id, pair->media_pts,
-            pair->pts_valid,
-            age_ms, left, right, pair->fence_deferrals,
-            pair->fence_deferrals
-                ? pair->first_fence_deferral_age_ns / 1000000.0 : -1.0,
-            pair->fence_deferrals
-                ? pair->last_fence_deferral_age_ns / 1000000.0 : -1.0,
-            pair->last_fence_deferral_msc,
-            pair->intermediate_r_probe_age_ns > 0
-                ? pair->intermediate_r_probe_age_ns / 1000000.0 : -1.0,
-            pair->intermediate_r_probe_msc,
-            pair->intermediate_r_probe_age_ns > 0
-                ? pair->intermediate_r_fence_L : -1,
-            pair->intermediate_r_probe_age_ns > 0
-                ? pair->intermediate_r_fence_R : -1);
+    vo_drm_stereo_log_drop(drm, &(struct drm_stereo_async_drop) {
+        .reason = reason, .count = count,
+        .pending_gen = pair->generation,
+        .active_gen = s->active.generation,
+        .frame_id = pair->frame_id,
+        .media_pts = pair->media_pts,
+        .pts_valid = pair->pts_valid,
+        .age_ms = age_ms,
+        .fence_left = left, .fence_right = right,
+        .deferrals = pair->fence_deferrals,
+        .first_deferral_ms = pair->fence_deferrals
+            ? pair->first_fence_deferral_age_ns / 1000000.0 : -1.0,
+        .last_deferral_ms = pair->fence_deferrals
+            ? pair->last_fence_deferral_age_ns / 1000000.0 : -1.0,
+        .last_deferral_msc = pair->last_fence_deferral_msc,
+        .r_probe_age_ms = pair->intermediate_r_probe_age_ns > 0
+            ? pair->intermediate_r_probe_age_ns / 1000000.0 : -1.0,
+        .r_probe_msc = pair->intermediate_r_probe_msc,
+        .r_probe_left = pair->intermediate_r_probe_age_ns > 0
+            ? pair->intermediate_r_fence_L : -1,
+        .r_probe_right = pair->intermediate_r_probe_age_ns > 0
+            ? pair->intermediate_r_fence_R : -1,
+    });
 }
 
 // Zero-timeout poll of both eyes on the RT worker. No EGL/GL operations
