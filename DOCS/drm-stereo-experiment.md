@@ -5574,3 +5574,63 @@ on this machine. No modification to scheduling logic
 is warranted. Verify ordinary DRM 2D output separately;
 it has not yet been tested as part of this default-on
 rollout. Testing across other KMS drivers is outstanding.
+
+
+### 2026-10-25: ordinary 2D DRM regression smoke test passes on i915
+
+Target log: `mpv-drm-2d-regression.log`; build
+`v0.41.0-dev-g52f962978`, Intel Iris Xe (i915 1.6.0),
+Mesa 26.2.5, DP-1 2560x1440 @ 120Hz. Invoked:
+
+```sh
+env -u MPV_DRM_STEREO_PLAN_HOLD \
+    -u MPV_DRM_STEREO_TWO_SLOT_QUEUE \
+    ./build/mpv --no-config --vo=gpu --gpu-context=drm \
+    --drm-connector=DP-1 --drm-mode=2560x1440@120 \
+    --drm-stereo-3d=no --start=295 --length=30 \
+    --log-file=/tmp/mpv-drm-2d-regression.log \
+    "/home/life/Веном_Venom (2018) BDRip.Half-SBS.1080p.NNMClub.mkv"
+```
+
+**PASS for ordinary 2D path.** At startup the CLI
+explicitly applied `drm-stereo-3d=no`; DRM atomic
+support was detected, native display mode was
+2560x1440@120, normal VO estimated
+`119.997589 FPS for display sync` (physical
+display refresh, unlike native stereo's logical
+~60Hz). Standard `VO: [gpu] 1920x1080 yuv420p`
+configured with software H.264 decoding and
+PipeWire audio. `playback restart complete @
+295.003000, audio=playing, video=playing`
+at 0.597s, then `audio EOF reached` at
+30.400s, `finished playback, success (reason 0)`
+at 30.565s and `Exiting... (End of file)`
+at 30.569s. The log continues through 30.616s
+shader-cache flushing, but does not independently
+establish the process exit code.
+
+The log contains **no**
+`Stereo scheduling policy`, `Stereo KMS first`,
+`Stereo DRM final`, stereo staging/queue/fence
+initialization or stereo worker reports, supporting
+that normal DRM/EGL page-flip handling was used
+and that the new queue/plan default-on policy
+does not activate for `--drm-stereo-3d=no`.
+The source MKV's `StereoMode=sbs2l` metadata
+does not itself activate native output stereo.
+There are also no `Failed to commit atomic request`,
+`Failed to restore previous mode` or SDR restore
+warnings in this run.
+
+**Scope of evidence:** this is a 30-second 2D
+functional regression smoke test, NOT 2D per-vblank
+timing validation. Normal 2D does not expose the
+custom stereo KMS missed-vblank/parity counters;
+therefore zero *logged errors* does not prove zero
+missed 2D vblanks or perfect real-time pacing.
+No other driver or resolution is covered. With
+this 2D smoke test, the proposed stereo-only
+`QUEUE2 + PLAN_HOLD` default-on rollout has
+passed the requested 2D compatibility checkpoint
+on the tested i915/Mesa system. No new C code
+change is required.
