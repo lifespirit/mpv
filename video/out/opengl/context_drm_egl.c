@@ -118,7 +118,9 @@ struct stereo_usb {
     int event_fd;
     bool started;
     bool invert_eyes;
+    bool dry_run;
     bool timestamp_monotonic;
+    int init_status; // 1=sender ready; -1=dlopen; -2=symbols; -3=device; -4=rate
     char *firmware;
     char *library;
     float refresh_hz;
@@ -1700,6 +1702,8 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
     drm->redraw = false;
 }
 
+static void stereo_usb_stop(struct ra_ctx *ctx);
+
 static void drm_egl_uninit(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv;
@@ -1731,7 +1735,7 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
                     "fence_checks=%llu fence_promotions=%llu "
                     "fence_deferrals=%llu fence_errors=%llu "
                     "pair_update_skips=%llu commit_errors=%llu "
-                    "(scanout telemetry, no USB)\n",
+                    "(scanout telemetry; USB reported separately when enabled)\n",
                     (unsigned long long)drm->stereo_flips,
                     (unsigned long long)drm->stereo_missed_slots,
                     (unsigned long long)drm->stereo_parity_errors,
@@ -2140,16 +2144,10 @@ static void *stereo_usb_sender_thread(void *opaque)
 {
     struct stereo_usb *u = opaque;
     struct ra_ctx *ctx = u->ctx;
-    void *lib = dlopen(u->library ? u->library : "libnvstusb.so.0",
-                       RTLD_NOW | RTLD_LOCAL);
-    if (!lib && !u->library)
-        lib = dlopen("libnvstusb.so", RTLD_NOW | RTLD_LOCAL);
-    if (!lib) {
-        MP_WARN(ctx, "Stereo USB: cannot load libnvstusb (%s); "
-                "video scanout continues without IR\n", dlerror());
-        return NULL;
-    }
+    void *lib = NULL, *dev = NULL;
 
+    // Deliberately avoid a hard link dependency: in the default mode this
+    // code does not load libnvstusb or claim any USB device at all.
     struct nvstusb_api {
         void *(*init)(const char *);
         void (*deinit)(void *);
@@ -2157,44 +2155,58 @@ static void *stereo_usb_sender_thread(void *opaque)
         int (*last_error)(void *);
         void (*invert)(void *);
         int (*send_eye)(void *, int);
-    } api = {
-        .init = dlsym(lib, "nvstusb_init"),
-        .deinit = dlsym(lib, "nvstusb_deinit"),
-        .set_rate = dlsym(lib, "nvstusb_set_rate"),
-        .last_error = dlsym(lib, "nvstusb_last_error"),
-        .invert = dlsym(lib, "nvstusb_invert_eyes"),
-        .send_eye = dlsym(lib, "nvstusb_send_eye"),
-    };
-    if (!api.init || !api.deinit || !api.set_rate || !api.last_error ||
-        !api.invert || !api.send_eye) {
-        MP_WARN(ctx, "Stereo USB: incompatible libnvstusb; "
-                "nvstusb_send_eye and its support API are required\n");
-        dlclose(lib);
-        return NULL;
+    } api = {0};
+    int error = 0;
+    if (!u->dry_run) {
+        lib = dlopen(u->library ? u->library : "libnvstusb.so.0",
+                     RTLD_NOW | RTLD_LOCAL);
+        if (!lib && !u->library)
+            lib = dlopen("libnvstusb.so", RTLD_NOW | RTLD_LOCAL);
+        if (!lib) {
+            u->init_status = -1;
+            MP_WARN(ctx, "Stereo USB: cannot load libnvstusb (%s); "
+                    "video scanout continues without IR\n", dlerror());
+            return NULL;
+        }
+        api.init = dlsym(lib, "nvstusb_init");
+        api.deinit = dlsym(lib, "nvstusb_deinit");
+        api.set_rate = dlsym(lib, "nvstusb_set_rate");
+        api.last_error = dlsym(lib, "nvstusb_last_error");
+        api.invert = dlsym(lib, "nvstusb_invert_eyes");
+        api.send_eye = dlsym(lib, "nvstusb_send_eye");
+        if (!api.init || !api.deinit || !api.set_rate || !api.last_error ||
+            !api.invert || !api.send_eye) {
+            u->init_status = -2;
+            MP_WARN(ctx, "Stereo USB: incompatible libnvstusb; "
+                    "nvstusb_send_eye and its support API are required\n");
+            goto shutdown;
+        }
+        // Firmware upload/re-enumeration and all other blocking USB traffic
+        // execute only in this normal-priority thread.
+        dev = api.init(u->firmware);
+        if (!dev) {
+            u->init_status = -3;
+            MP_WARN(ctx, "Stereo USB: emitter unavailable or firmware failed; "
+                    "video scanout continues\n");
+            goto shutdown;
+        }
+        api.set_rate(dev, u->refresh_hz);
+        error = api.last_error(dev);
+        if (error) {
+            u->init_status = -4;
+            u->usb_errors++;
+            u->usb_error_code = error;
+            MP_WARN(ctx, "Stereo USB: emitter timing setup failed: %d\n", error);
+            goto shutdown;
+        }
+        if (u->invert_eyes)
+            api.invert(dev);
     }
-
-    // nvstusb_init() and set_rate() can upload firmware/re-enumerate USB.
-    // They execute solely in this normal-priority sender thread.
-    void *dev = api.init(u->firmware);
-    if (!dev) {
-        MP_WARN(ctx, "Stereo USB: emitter unavailable or firmware failed; "
-                "video scanout continues\n");
-        dlclose(lib);
-        return NULL;
-    }
-    api.set_rate(dev, u->refresh_hz);
-    int error = api.last_error(dev);
-    if (error) {
-        u->usb_errors++;
-        u->usb_error_code = error;
-        MP_WARN(ctx, "Stereo USB: emitter timing setup failed: %d\n", error);
-        goto close_usb;
-    }
-    if (u->invert_eyes)
-        api.invert(dev);
-    MP_INFO(ctx, "Stereo USB: emitter initialized at %.3fHz "
-            "(inverted=%d, confirmation-driven; optical phase UNCALIBRATED)\n",
-            u->refresh_hz, u->invert_eyes);
+    u->init_status = 1;
+    MP_INFO(ctx, "Stereo USB: sender initialized at %.3fHz "
+            "(dry_run=%d inverted=%d, confirmed KMS flip trigger, "
+            "optical phase UNCALIBRATED)\n",
+            u->refresh_hz, u->dry_run, u->invert_eyes);
 
     uint64_t last_word = 0;
     uint32_t last_msc = 0;
@@ -2215,12 +2227,14 @@ static void *stereo_usb_sender_thread(void *opaque)
         if (atomic_load_explicit(&u->stop, memory_order_acquire))
             break;
 
+        // Read a consistent snapshot from the single KMS callback writer.
         uint64_t word = 0, ust_us = 0, seq1, seq2;
         do {
             seq1 = atomic_load_explicit(&u->mailbox_seq, memory_order_acquire);
             if (seq1 & 1)
                 continue;
-            word = atomic_load_explicit(&u->mailbox_event, memory_order_relaxed);
+            word = atomic_load_explicit(&u->mailbox_event,
+                                         memory_order_relaxed);
             ust_us = atomic_load_explicit(&u->mailbox_ust_us,
                                           memory_order_relaxed);
             seq2 = atomic_load_explicit(&u->mailbox_seq, memory_order_acquire);
@@ -2255,7 +2269,8 @@ static void *stereo_usb_sender_thread(void *opaque)
         }
         struct timespec begin, end;
         clock_gettime(CLOCK_MONOTONIC, &begin);
-        error = api.send_eye(dev, eye);
+        if (!u->dry_run)
+            error = api.send_eye(dev, eye);
         clock_gettime(CLOCK_MONOTONIC, &end);
         double usb_ms = (end.tv_sec - begin.tv_sec) * 1000.0 +
                         (end.tv_nsec - begin.tv_nsec) / 1e6;
@@ -2272,9 +2287,11 @@ static void *stereo_usb_sender_thread(void *opaque)
         u->sent++;
     }
 
-close_usb:
-    api.deinit(dev);
-    dlclose(lib);
+shutdown:
+    if (dev)
+        api.deinit(dev);
+    if (lib)
+        dlclose(lib);
     return NULL;
 }
 
@@ -2305,8 +2322,10 @@ static void stereo_usb_start(struct ra_ctx *ctx)
     const char *library = getenv("MPV_DRM_STEREO_USB_LIBRARY");
     if (library && *library)
         u->library = talloc_strdup(p, library);
-    u->invert_eyes = getenv("MPV_DRM_STEREO_USB_INVERT_EYES") &&
-                     strcmp(getenv("MPV_DRM_STEREO_USB_INVERT_EYES"), "1") == 0;
+    const char *invert = getenv("MPV_DRM_STEREO_USB_INVERT_EYES");
+    u->invert_eyes = invert && strcmp(invert, "1") == 0;
+    const char *dry_run = getenv("MPV_DRM_STEREO_USB_DRY_RUN");
+    u->dry_run = dry_run && strcmp(dry_run, "1") == 0;
     atomic_init(&u->stop, false);
     atomic_init(&u->mailbox_seq, 0);
     atomic_init(&u->mailbox_event, 0);
@@ -2328,9 +2347,9 @@ static void stereo_usb_start(struct ra_ctx *ctx)
     u->started = true;
     drm->stereo_usb_opaque = u;
     drm->stereo_usb_on_confirmed_flip = stereo_usb_confirm_flip;
-    MP_WARN(ctx, "Stereo USB: EXPERIMENTAL IR bridge enabled, "
-            "not phase calibrated; observe through a camera/sensor "
-            "before wearing glasses\n");
+    MP_WARN(ctx, "Stereo USB: EXPERIMENTAL %s bridge enabled; "
+            "not phase calibrated. Do not wear glasses until "
+            "optically validated\n", u->dry_run ? "DRY-RUN" : "IR");
 }
 
 static void stereo_usb_stop(struct ra_ctx *ctx)
@@ -2348,11 +2367,13 @@ static void stereo_usb_stop(struct ra_ctx *ctx)
     (void)write(u->event_fd, &one, sizeof(one));
     pthread_join(u->thread, NULL);
     close(u->event_fd);
-    MP_INFO(ctx, "Stereo USB final: confirmed=%llu sent=%llu "
+    MP_INFO(ctx, "Stereo USB final: dry_run=%d init_status=%d "
+            "confirmed=%llu sent=%llu "
             "skipped_msc=%llu wake_errors=%llu usb_errors=%llu "
             "last_usb_error=%d late_gt_2ms=%llu late_gt_period=%llu "
             "max_scanout_to_send_ms=%.3f max_usb_transfer_ms=%.3f "
-            "(USB submissions only, NOT optical sync)\n",
+            "(dry-run or USB submissions only, NOT optical sync)\n",
+            u->dry_run, u->init_status,
             (unsigned long long)atomic_load(&u->confirmed),
             (unsigned long long)u->sent,
             (unsigned long long)u->skipped,
