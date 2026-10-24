@@ -150,6 +150,12 @@ struct stereo_kms {
     // Native --drm-stereo-3d defaults to planned MSC hold; independent
     // explicit 0/1 environment override for regressions.
     bool plan_hold;
+    // Opt-in causal experiment: intentionally withhold ONE eligible pending
+    // promotion for one additional full L/R cycle at a selected generation.
+    // Physical 120Hz flips and the USB callback are never suppressed.
+    uint64_t test_extra_hold_generation;
+    bool test_extra_hold_injected;
+    uint32_t test_extra_hold_target_msc;
     // Independent mpv VO wake edge; presentation feedback stays attached
     // to the configured --drm-stereo-pacing-eye. Default is the same eye.
     int render_wake_eye;
@@ -996,6 +1002,18 @@ static void *stereo_kms_thread(void *arg)
                 s->pending.last_fence_deferral_msc = target_msc;
             }
         }
+        // Cause a SINGLE known 2->3 (or 3->4) movie hold, without
+        // dropping any physical L/R flip. This is diagnostic-only.
+        // It runs only after the normal plan and GPU fences say that the
+        // pending pair could have been promoted now.
+        if (eligible && fences_ready && s->plan_hold &&
+            s->test_extra_hold_generation &&
+            !s->test_extra_hold_injected &&
+            s->active.generation == s->test_extra_hold_generation) {
+            s->test_extra_hold_injected = true;
+            s->test_extra_hold_target_msc = target_msc;
+            eligible = false;
+        }
         bool promote = eligible && fences_ready;
         struct stereo_pair *selected = promote ? &s->pending : &s->active;
         struct framebuffer *fb = gbm_bo_get_user_data(selected->bo[eye]);
@@ -1721,6 +1739,14 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
         pthread_mutex_unlock(&s->mutex);
         if (s->started)
             pthread_join(s->thread, NULL);
+        if (s->test_extra_hold_generation)
+            MP_INFO(ctx, "Stereo DIAGNOSTIC extra hold final: "
+                    "target_generation=%llu injected=%d target_msc=%u "
+                    "(one complete extra L/R cycle; physical flips and "
+                    "USB notifications unchanged)\n",
+                    (unsigned long long)s->test_extra_hold_generation,
+                    s->test_extra_hold_injected,
+                    s->test_extra_hold_target_msc);
         stereo_usb_stop(ctx);
 
         // Print one final snapshot after the KMS worker has stopped, never
@@ -2570,6 +2596,23 @@ static bool drm_egl_init(struct ra_ctx *ctx)
                          strcmp(gpu_wait, "1") == 0;
     p->stereo.plan_hold = stereo_env_policy(ctx, "MPV_DRM_STEREO_PLAN_HOLD",
                                             p->stereo.enabled, native_3d);
+    const char *extra_gen = getenv("MPV_DRM_STEREO_TEST_EXTRA_HOLD_GEN");
+    if (native_3d && extra_gen && *extra_gen) {
+        char *end = NULL;
+        errno = 0;
+        unsigned long long value = strtoull(extra_gen, &end, 10);
+        if (!errno && end != extra_gen && *end == '\0' &&
+            value >= 2 && value <= 100000 && p->stereo.plan_hold) {
+            p->stereo.test_extra_hold_generation = value;
+            MP_WARN(ctx, "Stereo DIAGNOSTIC one-shot extra full L/R "
+                    "hold: target_generation=%llu (movie-frame hold only; "
+                    "no physical KMS/USB frame will be dropped)\n", value);
+        } else {
+            MP_WARN(ctx, "Invalid MPV_DRM_STEREO_TEST_EXTRA_HOLD_GEN='%s' "
+                    "(requires native 3D, PLAN_HOLD=1, generation 2..100000); "
+                    "ignoring\n", extra_gen);
+        }
+    }
     drm->stereo_pair_plan_hold = p->stereo.plan_hold;
     if (p->stereo.plan_hold)
         MP_INFO(ctx, "Stereo planned-hold MSC gate enabled\n");
