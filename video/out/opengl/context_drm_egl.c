@@ -1337,6 +1337,10 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
             return;
         }
 
+        // The old unpublished staging pair, if superseded, is detached
+        // under mutex but its GBM buffers are released on the producer
+        // AFTER unlocking. Never hold up 120Hz KMS on GBM teardown.
+        struct stereo_pair overwritten = {0};
         pthread_mutex_lock(&s->mutex);
         if (s->building.bo[eye]) {
             if (s->building.fence_fd[eye] > 0)
@@ -1403,14 +1407,16 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
                     if (protect) {
                         drm->stereo_pair_kept_ready_pending++;
                         drm->stereo_pair_dropped_newer_incoming++;
-                        stereo_release_pair(p, &s->building);
+                        overwritten = s->building;
                         s->building = (struct stereo_pair){0};
                         drm->stereo_pair_rendered++;
                         pthread_mutex_unlock(&s->mutex);
+                        stereo_release_pair(p, &overwritten);
                         return;
                     }
                     stereo_note_unpresented_pair(ctx, "newer_generation");
-                    stereo_release_pair(p, &s->pending);
+                    overwritten = s->pending;
+                    s->pending = (struct stereo_pair){0};
                 }
                 s->pending = s->building;
             }
@@ -1425,6 +1431,8 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
             pthread_cond_signal(&s->ready);
         }
         pthread_mutex_unlock(&s->mutex);
+        if (overwritten.bo[0])
+            stereo_release_pair(p, &overwritten);
         return;
     }
 
