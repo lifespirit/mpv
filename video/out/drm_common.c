@@ -362,7 +362,7 @@ static void stereo_async_print_stats(const struct drm_stereo_async_event *event)
             "fence_deferrals=%llu fence_unready_L=%llu "
             "fence_unready_R=%llu fence_errors=%llu "
             "draws=%llu commit_errors=%llu msc=%u eye=%s "
-            "(video output only; USB disabled)\n",
+            "(video/KMS counters only; separate USB bridge counters in Stereo USB final)\n",
             (unsigned long long)drm->stereo_flips, shown_hz,
             window_hz,
             (unsigned long long)window_missed,
