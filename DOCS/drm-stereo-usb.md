@@ -366,3 +366,55 @@ flip logged *after* `startup gate READY`.
 There is still no evidence of actual optical eye
 transmission timing, so do not equate a software
 PASS with a usable glasses configuration.
+
+
+## Target i915 readiness-gated live USB re-test: PASS (2026-10-25)
+
+Artifacts: `mpv-stereo-usb-1792881036-361692.{log,json}`.
+Test binary `v0.41.0-dev-g2064ac389`, real NVIDIA IR emitter,
+Intel Iris Xe / i915 1.6.0 / Mesa 26.2.5,
+DP-1 2560x1440@120Hz, film segment `--length=10`,
+`--usb-init-timeout-ms=3000`; mpv exited 0
+after successful 10-second segment.
+
+**Startup gate verified by log ordering:** emitter initialisation
+completed at log t=**1.352s**, the VO reported
+`Stereo USB: startup gate READY, took 1114.579ms
+(timeout=3000ms)` at t=**1.353s**, and the first
+`Stereo KMS first atomic flip submitted: eye=L`
+only appeared at t=**1.622s**. Startup waiting was
+entirely before independent movie-frame KMS scanout;
+USB operations did not stall the active 120Hz worker.
+
+**Exact event accounting:** `confirmed=1212 sent=1212
+startup_skipped=0 skipped_msc=0 unaccounted=0
+wake_errors=0 usb_errors=0 last_usb_error=0`.
+No software wake exceeded 2ms or a refresh interval
+(`late_gt_2ms=0 late_gt_period=0`). Maximum
+physical-KMS-UST-to-start-send delay **0.438ms**;
+maximum measured synchronous USB-call duration
+**0.287ms**. These are software timing upper maxima
+for this run, NOT LCD-to-lens timings.
+
+**KMS unchanged:** `flips=1212 missed_vblanks=0
+parity_errors=0 wrong_eye=0 wrong_hold=0
+commit_errors=0 fence_errors=0
+pair_unpresented_discards=0`, first eye L/R=238/238;
+6 expected GPU fence deferrals, no unpresented frame loss.
+The queue staged 62 second enqueues and 62 promotions,
+with no pressure skips. The presentation plan exact
+rate was **233/235 = 99.15%** (2 adjacent mismatches,
+abs_error_cycles=2, includes startup). No SDR/CRTC
+teardown errors.
+
+**Disposition:** readiness-gated optical emitter **USB
+transport validation PASS** for this host and workload.
+The formerly observed ~104 unsent startup commands are
+now eliminated. Do not adjust the KMS scheduler or
+introduce arbitrary phase offsets based only on this
+test. `optical_phase_verified=false`: lens transmission,
+IR waveform phase, crosstalk, LCD response and display
+scanout position remain unknown. Next milestone is an
+optical measurement with a controlled Half-SBS test
+pattern and sensor/high-speed camera, with both eye
+channels characterized independently.
