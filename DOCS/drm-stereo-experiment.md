@@ -4336,3 +4336,62 @@ No GPU waits, ioctls or allocations were added to SCHED_FIFO KMS.
 The existing bounded asynchronous logger may drop diagnostic events
 under load, so always check its loss count and avoid interpreting
 missing events as missing movie frames.
+
+
+### Lost-pair probe outcome: late R signal versus next producer overwrite
+
+Baseline test `mpv-stereo-right-swap0(1).log`, despite the reused
+filename, **did not enable** the right swap interval experiment: build
+`v0.41.0-dev-gf102d6c65`, no `Stereo right EGLSurface` enable log;
+`PLAN_HOLD`, `RENDER_WAKE_EYE` and `KEEP_READY_PENDING` disabled.
+The test command did not explicitly unset
+`MPV_DRM_STEREO_RIGHT_SWAP_INTERVAL_ZERO`, so future reproducible
+baseline commands should unset it too.
+
+Summary: 14,403 confirmed physical flips, 0 missed physical vblanks,
+0 wrong eye/hold/parity, 0 in-play commit errors. 2,877 pair renders,
+2,857 confirmed first L generations, 20 unpresented pending discards,
+20 `frame_id_gaps`. 1,452 native fence deferrals, 0 fence errors.
+Planned-vs-actual exact 1,476 / 2,836 comparable intervals (52.0%).
+There were 179 periodic `kind=sample` GPU probes and, importantly,
+exactly 20 `kind=discard` probes for all 20 lost generations.
+
+Every one of these 20 losses shows:
+- Two failed L-boundary fence checks, with most recent L check at pair
+  age 28.332–32.725ms (median 31.747ms).
+- The LEFT kernel fence had *already* signaled before that last L
+  check (mean L signal age 20.228ms vs 31.650ms for the check).
+- The RIGHT kernel fence signaled **AFTER** the last L check,
+  by min 0.314ms / median 1.466ms / mean 1.770ms / max 5.226ms.
+  R signal age relative to pair publication averaged 33.420ms.
+- By the time the next producer publication discarded the old pending
+  generation, the RIGHT fence had already signaled. The R-signal to
+  discard lead was 0.062–1.290ms, median 0.164ms (mean 0.433ms).
+  Every one of the 20 producer-side `fence_L` and `fence_R`
+  snapshot values was 1 (both signaled).
+- The producer replaced the pending pair 1.034–5.352ms after the
+  last failed L check, median 1.785ms. The next permissible L boundary
+  would occur approximately 16.667ms after the failed check (120Hz
+  physical L/R) because the next physical refresh is R, not L.
+
+This is **not** KMS or GL throughput failure. It is a deterministic
+*late-to-L / ready-before-next-frame / overwritten-before-next-L*
+queue policy failure. It cannot be fixed by promoting at the immediate
+R refresh without mixing two source generations between eyes. Waiting
+for R on the SCHED_FIFO KMS thread would also break the hard physical
+refresh pacing. Since producer publication precedes the next eligible
+L edge, preservation of the old ready pending generation requires
+retaining that generation across new frame arrival.
+
+A one-slot KEEP_READY_PENDING trial protected old ready pending frames
+and reduced displayed source `frame_id_gaps` from 15 to 11 in an
+earlier run, but explicitly discarded 10 newly arriving generations:
+it exchanges which frame is lost, rather than delivering both. The
+next design should define media-PTS anchored deadlines, bounded
+generation queueing and GBM BO ownership/backpressure before aiming
+to eliminate source-frame losses. With two pending generations plus
+one currently scanned-out pair, typical GBM surface triple buffering
+already consumes all three BOs per eye; a producer cannot blindly
+render a fourth generation. Require bounded buffering, explicit
+late-frame selection and measured impact on audio/video latency,
+rather than silently introducing unbounded presentation delay.
