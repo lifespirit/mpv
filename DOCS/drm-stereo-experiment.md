@@ -5414,3 +5414,84 @@ behavior have not been established by these
 tests. Keep opt-out facilities during first
 default-on rollout, and do not enable test
 queue hold injection by default.
+
+
+### 2026-10-25: native-stereo default policy verified by physical IPC run
+
+Test artifacts: `mpv-stereo-ipc-stress-20261025-002437-348760.{log,jsonl}`;
+binary `v0.41.0-dev-g52f962978` on i915 / Intel Iris Xe /
+Mesa 26.2.5, DP-1 2560x1440@120Hz. The independent Python
+policy test used `--policy default --scale 0.25`. Its JSONL
+`launch` event confirms `env_overrides={}` and the
+test removed both environment variables rather than setting
+`=1`; the VO initialization reports exactly
+`Stereo scheduling policy: plan_hold=1 two_slot_queue=1
+(native_3d=1; ...)`, and the JSONL has
+`policy_verified` with both enabled. This is
+the FIRST on-hardware confirmation that the defaults
+introduced at `474c53b` are active without env opt-ins.
+
+The scaled-down 36.5s run executed 18 IPC actions
+(5 pause/resume pairs and 8 exact seeks). All 8
+seeks settled and reported `playback-restart`;
+a 1.5s pause held `time-pos=297.672` constant,
+and a seek while paused went from 363.321 to
+323.323 with `pause=true` until explicit resume.
+`test_complete` succeeded; mpv exited with code 0.
+Final `time-pos=345.971`, `pause=false`,
+`seeking=false`, internal
+`avsync=-0.001734s`, `vo-delayed-frame-count=0`.
+
+DRM summary: `flips=4308 missed_vblanks=0
+parity_errors=0 wrong_eye=0 wrong_hold=0
+pair_renders=731 pair_gen=730 first_eye_L=726
+first_eye_R=726 pair_unpresented_discards=0
+fence_checks=749 fence_promotions=725
+fence_deferrals=23 fence_errors=0
+pair_update_skips=0 commit_errors=0`.
+Two-slot queue: `second_enqueues=179
+second_promotions=179 full_skips=0 gbm_skips=0
+unexpected_incoming=0 remaining_pending=1
+remaining_queued=0` at the pre-release shutdown
+snapshot. The one remaining pending BO is
+normally released during teardown. Queue seek reset:
+`resets=11 pending_flushes=4 queued_flushes=0
+building_flushes=0`, consistent with seek flush
+semantics. Test-only injected queue hold was
+disabled (`hold_ms=0 triggered=0 hold_blocks=0`).
+No warnings or errors, including no atomic
+CRTC/SDR restoration EINVAL.
+
+The MSC plan comparison was
+`adjacent_compared=711 exact=698 mismatched=13`
+(98.17% exact), with
+`signed_error_cycles=33 abs_error_cycles=39`.
+`long_gap_resets=4 long_gap_ust_s=3.433`,
+`segments=13 discontinuities=12`
+(8 seek discontinuities + 4 recognized idle gaps).
+`frame_id_gaps=1` is the familiar startup
+frame 37->39. The source-vs-UST
+`relative_drift_last_ms=552.818` in the
+final segment is **not** real AV desync:
+the final scripted ~500ms pause burst can
+fall near/below the conservative >500ms long-gap
+cutoff and contaminate the wall-clock PTS metric.
+The final IPC `avsync` was -1.734ms. Distinguish
+this measurement artifact from physical KMS
+wrong-eye or frame-timing errors. This test
+deliberately includes startup, short pause bursts,
+seeks and resume transitions; do not directly
+compare its 98.17% plan rate with the 15-minute
+steady-state 99.981% baseline.
+
+**Disposition:** no change to the working realtime
+KMS scheduler or two-slot FIFO is justified by
+the default-on validation. Run `--policy no-plan`,
+`--policy no-queue`, `--policy both-off` separately
+to validate the opt-outs if desired. Also test
+ordinary DRM 2D mode and non-i915 GPUs before
+asserting broader cross-driver compatibility.
+A possible future diagnostic-only refinement
+would use explicit mpv pause-state transitions,
+rather than a wall-clock >500ms heuristic,
+to segment short pause bursts.
