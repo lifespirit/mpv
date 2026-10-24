@@ -702,6 +702,19 @@ Available video output drivers are:
         ``MPV_DRM_STEREO_SBS=1 MPV_DRM_STEREO_PAIR=1`` path keeps both
         policies off by default to preserve historical A/B behavior.
 
+        Experimental NVIDIA 3D Vision USB emitter output can be enabled
+        separately with ``MPV_DRM_STEREO_USB=1``. The optional
+        ``MPV_DRM_STEREO_USB_DRY_RUN=1`` tests scanout-to-sender
+        timing without accessing USB hardware. The helper dynamically
+        loads ``libnvstusb.so.0`` only when explicitly enabled.
+        Configure ``MPV_DRM_STEREO_USB_LIBRARY`` and
+        ``MPV_DRM_STEREO_USB_FIRMWARE`` as needed.
+        ``MPV_DRM_STEREO_USB_INVERT_EYES=1`` reverses the USB eye
+        assignment. This is NOT calibrated optical shutter synchronization:
+        USB commands are emitted after physical flip confirmation, and
+        actual lens timing must be measured before using the glasses.
+        See ``DOCS/drm-stereo-usb.md`` for the verification procedure.
+
     ``--drm-stereo-pacing-eye=<left|right>``
         Experimental choice of which confirmed physical eye refresh wakes
         mpv's logical 60 Hz display-synced frame scheduler when
