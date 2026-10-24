@@ -5042,3 +5042,123 @@ the default: exact seek while an in-flight FIRST-L
 commit is pending; rate change and reverse trick
 play; EOF/next-file reconfiguration; repeat
 runs without the forced hold and with stats off.
+
+
+### Playlist EOF -> next file -> idle -> loadfile lifecycle: PASS (2026-10-24)
+
+Logs: `mpv-stereo-playlist-lifecycle-20261024-234112-340233.log`
+and `.jsonl`, binary `v0.41.0-dev-g67b4f064d`,
+with `TWO_SLOT_QUEUE=1 PLAN_HOLD=1` and no artificial
+queue hold. The test used an ordinary copy of the same
+23.976fps Half-SBS source at `/home/life/Веном2.mkv`
+as the second playlist entry; this is intentionally a
+video-output lifecycle test, not a different-codec test.
+One mpv PID (340234) stayed alive across the complete run.
+
+JSON IPC:
+- Initial file warmed up from media 295s, then the next
+  playlist entry was appended with `loadfile ... append`.
+- First file was exact-seeked to 6732.768s (~8s before end).
+  `end-file reason=eof` for playlist entry 1 at wall elapsed
+  **13.430s**; `start-file` entry 2 at **13.445s**;
+  `file-loaded` entry 2 at **13.473s**. The new path was
+  `/home/life/Веном2.mkv`, `playlist-pos=1`, and normal
+  playing progress 295.000->302.803s was verified over 8s.
+- Second file was exact-seeked to 6732.768s and reached
+  genuine `end-file reason=eof` entry 2 at **29.530s**.
+  `core-idle=true`, `playlist-pos=-1`, `path=null`
+  were verified at **29.715s**, without terminating mpv.
+- `loadfile ... replace` at **31.717s** opened the
+  original as playlist entry 3; `start-file` at 31.720s,
+  `file-loaded` at 31.915s; playback progressed from
+  media 295.000->302.677s within 8s and ended the test
+  normally with mpv return code **0** at 40.095s.
+  Final `avsync=-0.003961s`, `vo-delayed-frame-count=0`
+  (mpv internal sync, NOT audio-to-photon measurement).
+
+**VO lifecycle:** There were exactly TWO DRM-stereo context
+initializations and TWO final summaries. mpv **reused the same
+VO/DRM stereo context across the consecutive first and second
+playlist files**, including a producer-side
+`Stereo queue seek reset: pending_frame_id=348 queued_frame_id=0`
+at the first EOF transition. It destroyed the first context
+only upon the **second** EOF (final line at 29.567s), when
+the player entered `idle`; it then created a second
+context on the subsequent explicit `loadfile replace`
+(at ~31.759s). So an automatic playlist transition
+must not be misdescribed as destroying/rebuilding KMS.
+
+**First context, spanning both files:**
+`flips=3489 missed_vblanks=0 parity_errors=0
+wrong_eye=0 wrong_hold=0 commit_errors=0`;
+`pair_renders=684 pair_gen=684 first_eye_L=681
+first_eye_R=681 pair_unpresented_discards=0
+pair_update_skips=0 fence_errors=0`.
+Two-slot FIFO: `second_enqueues=181
+second_promotions=181 full_skips=0 gbm_skips=0
+unexpected_incoming=0 remaining_pending=0
+remaining_queued=0`. Seek/reset telemetry:
+`resets=8 pending_flushes=3 queued_flushes=0
+building_flushes=0`. Planned holds:
+`adjacent_compared=673 exact=665 mismatched=8`;
+interactive startup/EOF/seek transitions are
+included, so this is NOT steady-state pacing.
+The first-L PTS trace explicitly crosses from
+first file PTS 6740.651 to second file PTS 295.003
+at MSC 6608691 -> 6608699, with a reset at the
+source PTS discontinuity, not a stale-generation
+promotion. `frame_id_gaps=1` is the known initial
+37->39 startup gap.
+
+**Second context, original file reloaded from idle:**
+`flips=943 missed_vblanks=0 parity_errors=0
+wrong_eye=0 wrong_hold=0 commit_errors=0`;
+`pair_renders=186 pair_gen=185 first_eye_L=185
+first_eye_R=185 pair_unpresented_discards=0
+pair_update_skips=0 fence_errors=0`.
+Two-slot queue `second_enqueues=0 second_promotions=0
+full_skips=0 gbm_skips=0 remaining_pending=1`
+at the pre-cleanup snapshot, a normal in-flight
+pending frame during quit; GBM release follows.
+`adjacent_compared=183 exact=181 mismatched=2
+frame_id_gaps=0`.
+
+**Resource lifetime:** JSONL `/proc/<pid>/fd` and
+`/proc/<pid>/status` samples during initial playback
+reported `open_fds=63 drm_fds=6 sync_file_fds=6
+dmabuf_fds=1 Threads=32 VmRSS=382416kB`.
+In `idle` following second EOF, both immediately
+and after 2 seconds, resources stabilized at
+`open_fds=22 drm_fds=0 sync_file_fds=0
+dmabuf_fds=0 Threads=17 VmRSS=348900kB`.
+After 8 seconds of new playback, resources were
+`open_fds=63 drm_fds=6 sync_file_fds=6
+dmabuf_fds=1 Threads=32 VmRSS=396224kB`.
+This establishes **no lingering DRM, sync_file
+or DMA-BUF FDs in idle** and confirms teardown and
+reinitialization. It does NOT prove lack of a slow
+GBM/GL process-memory leak: comparing a single live
+RSS from two phases (382 vs 396 MB) is insufficient.
+Repeat e.g. 20 EOF/idle/loadfile cycles to quantify
+any residual memory trend.
+
+**Known separate outstanding problem:** Both DRM
+context final reports show in-play `commit_errors=0`,
+but afterwards `vo/gpu/drm` logs
+`Failed to commit atomic request: Error number 22`
+at **29.658s** and **40.030s**, during CRTC restoration
+when closing a DRM context. This is *not* an in-play
+stereo flip failure and does not stop subsequent VO
+initialization, but the restore failure should be
+separately investigated and must not be described
+as fully successful restoration.
+
+Verdict: automatic consecutive-file playback, last-file
+EOF -> idle teardown and loadfile-replace reinit all
+work in a single mpv process with physical L/R
+integrity intact and no lingering special-purpose
+FDs after idle. No changes to the RT KMS frame scheduler
+are warranted from this log. Remaining independent
+checks: explicit repeated idle/reload cycles for
+leak detection; and the DRM atomic CRTC restoration
+EINVAL on every teardown.
