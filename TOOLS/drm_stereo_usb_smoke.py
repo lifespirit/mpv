@@ -13,7 +13,7 @@ import time
 def counters(line):
     return {
         key: (float(value) if "." in value else int(value))
-        for key, value in re.findall(r"([a-z][a-z0-9_]*)=(-?\d+(?:\.\d+)?)", line)
+        for key, value in re.findall(r"([A-Za-z][A-Za-z0-9_]*)=(-?\d+(?:\.\d+)?)", line)
     }
 
 
