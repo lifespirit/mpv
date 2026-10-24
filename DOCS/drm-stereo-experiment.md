@@ -4448,3 +4448,57 @@ Safety: this code has been reviewed by inspection, not compiled on
 the target i915 Arch system; treat it as experimental. Stop and
 report if there are compile errors, GBM front-buffer failures,
 KMS commit errors, visible A/V latency or playback freeze.
+
+
+ 
+### First two-slot FIFO A/B: zero missing source frames in 120 seconds
+ 
+Test log: `mpv-stereo-queue2.log`; build `v0.41.0-dev-gc51dfaddc`.
+Settings: DP-1 2560x1440@120, 23.976fps Half-SBS, movie offset
+295s, duration 120s, right-eye VO pacing, display-resample, 3-deep
+mpv swapchain, stereo stats ON. Only
+`MPV_DRM_STEREO_TWO_SLOT_QUEUE=1` enabled among queue/pacing experiments.
+ 
+Result: 14,405 physical flips and zero missed_vblanks, parity_errors,
+wrong_eye, wrong_hold or in-play atomic commit errors. The full
+2,877/2,877 producer pairs were confirmed at first L, with
+`frame_id_gaps=0` and `pair_unpresented_discards=0`.
+The second slot received 17 pairs and all 17 were eventually promoted:
+`second_enqueues=17 second_promotions=17`.
+`full_skips=0 gbm_skips=0 unexpected_incoming=0
+pair_update_skips=0`; queue empty at shutdown. `fence_deferrals=1553`
+versus 1452 in the prior f102d6c single-pending baseline.
+ 
+Same 120s single-pending baseline (`mpv-stereo-right-swap0(1).log`,
+`f102d6c`) produced all 2,877 pairs but confirmed only 2,857
+first-L source frames: 20 pending discards and 20 `frame_id_gaps`.
+Physical KMS remained error-free in both cases. This strongly
+supports overwriting the single pending pair as the cause of those
+20 *particular* playback losses; it does not prove no losses under
+other loads or scenes.
+ 
+Native GPU fence signal ages are little changed: 179 periodic samples
+per run, mean L=7.919ms, R=15.617ms, R-L=7.697ms for two-slot,
+versus clockfix baseline L=7.939ms, R=15.739ms, R-L=7.800ms.
+The FIFO changes the retention policy rather than rendering speed.
+ 
+Pacing is **not fixed**: exact previous `num_vsyncs` hold interval
+matches 1484/2875 = 51.62%. First-L inter-generation intervals:
+1 cycle=328, 2=1096, 3=1138, 4+=314. Movie PTS span=119.953s,
+KMS scanout span=119.986621s; anchor-relative end drift=+33.621ms,
+average=+104.744ms, max=+185.835ms. This *anchor-relative* drift
+does NOT measure absolute audio-to-photon latency. Existing PLAN_HOLD
+alone achieved 99.3% hold agreement in an older 120s test, but it
+discarded 31 movie frames with the single pending slot.
+ 
+Next controlled A/B should enable both
+`MPV_DRM_STEREO_TWO_SLOT_QUEUE=1` and
+`MPV_DRM_STEREO_PLAN_HOLD=1`, leaving KEEP_READY_PENDING,
+RENDER_WAKE_EYE and RIGHT_SWAP_INTERVAL_ZERO unset. This is the
+first time intentionally combining two knobs after the isolated
+baseline. Acceptance: no physical KMS errors, no high volume of
+full/GBM update skips, no source ID gaps, >98% exact planned hold
+intervals, no long-term accumulation of relative PTS drift. An
+apparent success must still be validated by perceptual A/V timing
+and longer-run tests. Media-clock deadlines remain a separate
+future step, not implicitly solved by PLAN_HOLD.
