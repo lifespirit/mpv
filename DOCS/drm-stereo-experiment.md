@@ -4887,3 +4887,70 @@ test without `QUEUE_TEST_HOLD_MS` after targeted
 revalidation. Observe that intentional seek flush
 counters are not movie-frame loss due to poor GPU
 performance.
+
+
+### Forced occupied-queue seek re-test PASSED after VOCTRL_RESET flush
+
+Test log: `mpv-stereo-ipc-stress-20261024-231757-335731.log`,
+JSON IPC trace `.jsonl`, binary `v0.41.0-dev-g67b4f064d`
+(with implementation commit `c3cf121`). Same i915/Mesa
+DP-1@120Hz, `TWO_SLOT_QUEUE=1`, `PLAN_HOLD=1`,
+and stress-only `QUEUE_TEST_HOLD_MS=750` as preceding
+failed run. Test completed successfully; mpv exit code 0.
+
+Timeline: producer recorded `Stereo queue test occupied`
+with pending frame **77**, queued frame **78** at t=2.404s.
+The test's IPC `seek 900 absolute+exact` arrived at
+t=2.411s. On the VO thread, `VOCTRL_RESET` emitted
+`Stereo queue seek reset: pending_frame_id=77
+queued_frame_id=78 building_frame_id=0` at t=2.419s.
+mpv completed playback restart for media position
+**900.024s** at t=2.457s. The first logged first-L
+confirmed PTS sample after the seek is generation **45**,
+frame ID **90**, PTS **900.024s**, MSC **6292582**.
+The old accepted unpublished frames 77/78 were
+removed before they could be promoted; continued scanout
+of the last pre-seek *active* image until a new L is ready
+is expected and protects eye parity.
+
+Final: `flips=2699 missed_vblanks=0 parity_errors=0
+wrong_eye=0 wrong_hold=0 commit_errors=0
+pair_unpresented_discards=0 fence_errors=0
+pair_update_skips=0`.
+`Stereo queue seek reset final: resets=5
+pending_flushes=2 queued_flushes=1 building_flushes=0`.
+`Stereo two-slot queue final: second_enqueues=204
+second_promotions=203 full_skips=0 gbm_skips=0
+unexpected_incoming=0 remaining_pending=1
+remaining_queued=0`. The 1 second-slot enqueue
+not promoted is an intentional seek flush (not a GPU
+discard); 1 unpublished pending pair at normal shutdown
+is later released by uninit, not a KMS leak.
+One-shot stress gate `triggered=1 hold_blocks=1`;
+seek promptly disarmed its active hold deadline, rather
+than incurring the previous run's 45 blocked L promotions.
+Playback avsync from IPC after the 10s recovery at
+media 910.118 was -1.273ms, and after the return
+seek and another 10s at media 305.138 was -2.149ms
+(mpvs internal status, not a physical AV measurement).
+
+`Stereo plan final: adjacent_compared=522 exact=514
+mismatched=8`; `frame_id_gaps=1` is the preexisting
+startup 37->39 gap, not a post-seek queue eviction.
+`segments=3 discontinuities=2 long_gap_resets=0`;
+the explicit seek canceling the injected hold made
+the interval too short for the 500ms idle-gap threshold.
+At shutdown, as in previous tests, a CRTC restoration
+atomic EINVAL occurs *after* the `commit_errors=0`
+in-play final report; handle separately.
+
+Conclusion: the reproducible occupied-FIFO seek regression
+from the prior run is fixed by flushing unpublished
+pairs on `VOCTRL_RESET`. Do NOT conflate its intentional
+seek flush counts with GPU pressure or missed source
+frames. This stress input now passes, but it has not
+tested every possible seek timing (e.g. an already
+submitted pending first-L commit concurrently with a
+VO reset). The next validation is ordinary pause/seek
+with the stress-only test hold variable unset, followed
+by long-running end-of-file and reconfiguration checks.
