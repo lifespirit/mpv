@@ -19,6 +19,10 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <fcntl.h>
+#if defined(__linux__)
+#include <linux/sync_file.h>
+#endif
 #include <string.h>
 #include <signal.h>
 #include <sys/ioctl.h>
@@ -91,6 +95,7 @@ enum drm_stereo_async_kind {
     DRM_STEREO_ASYNC_STATS,
     DRM_STEREO_ASYNC_GAP,
     DRM_STEREO_ASYNC_DROP,
+    DRM_STEREO_ASYNC_GPU_PROBE,
 };
 
 struct drm_stereo_async_event {
@@ -104,6 +109,7 @@ struct drm_stereo_async_event {
         } stats;
         struct drm_stereo_async_gap gap;
         struct drm_stereo_async_drop drop;
+        struct drm_stereo_gpu_probe gpu_probe;
     };
 };
 
@@ -178,6 +184,108 @@ void vo_drm_stereo_log_drop(struct vo_drm_state *drm,
     e->kind = DRM_STEREO_ASYNC_DROP;
     e->drop = *drop;
     stereo_async_publish(drm);
+}
+
+void vo_drm_stereo_log_gpu_probe(struct vo_drm_state *drm,
+                                  const struct drm_stereo_gpu_probe *probe)
+{
+    if (!drm->opts || !drm->opts->stereo_stats ||
+        probe->fence_fd[0] <= 0 || probe->fence_fd[1] <= 0)
+        return;
+    struct drm_stereo_async_event *e = stereo_async_reserve(drm);
+    if (!e)
+        return;
+    // The real KMS worker continues polling the original descriptors.
+    // Only the normal-priority logger owns these dup'd descriptors.
+    const int left = fcntl(probe->fence_fd[0], F_DUPFD_CLOEXEC, 3);
+    const int right = fcntl(probe->fence_fd[1], F_DUPFD_CLOEXEC, 3);
+    if (left < 0 || right < 0) {
+        if (left >= 0) close(left);
+        if (right >= 0) close(right);
+        atomic_fetch_add_explicit(&drm->stereo_async_log->dropped,
+                                  1, memory_order_relaxed);
+        pthread_mutex_unlock(&drm->stereo_async_log->mutex);
+        return;
+    }
+    e->kind = DRM_STEREO_ASYNC_GPU_PROBE;
+    e->gpu_probe = *probe;
+    e->gpu_probe.fence_fd[0] = left;
+    e->gpu_probe.fence_fd[1] = right;
+    stereo_async_publish(drm);
+}
+
+static void stereo_async_print_gpu_probe(struct vo_drm_state *drm,
+                                         struct drm_stereo_gpu_probe *sample)
+{
+    struct pollfd pfd[2] = {
+        {.fd = sample->fence_fd[0], .events = POLLIN},
+        {.fd = sample->fence_fd[1], .events = POLLIN},
+    };
+    int64_t observed_ns[2] = {0, 0};
+    int64_t kernel_ns[2] = {0, 0};
+    // Bounded 100ms; never delay scanout. poll timestamps are upper
+    // bounds on GPU completion, subject to logger scheduling latency.
+    for (int attempt = 0; attempt < 10; attempt++) {
+        if (pfd[0].fd < 0 && pfd[1].fd < 0)
+            break;
+        int rc = poll(pfd, 2, 10);
+        if (rc <= 0)
+            continue;
+        int64_t now_ns = mp_time_ns();
+        for (int eye = 0; eye < 2; eye++) {
+            if (pfd[eye].fd < 0 ||
+                !(pfd[eye].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)))
+                continue;
+            if (pfd[eye].revents & POLLIN) {
+                observed_ns[eye] = now_ns;
+#if defined(__linux__)
+                // The kernel may expose the actual dma_fence signal
+                // timestamp. Convert raw CLOCK_MONOTONIC time to mpv's
+                // offset monotonic timeline before comparing to ready_ns.
+                struct sync_file_info info = {0};
+                if (!ioctl(pfd[eye].fd, SYNC_IOC_FILE_INFO, &info) &&
+                    info.num_fences > 0 && info.num_fences <= 16) {
+                    struct sync_fence_info fences[16] = {0};
+                    info.sync_fence_info = (uintptr_t)fences;
+                    if (!ioctl(pfd[eye].fd, SYNC_IOC_FILE_INFO, &info)) {
+                        uint64_t latest_ns = 0;
+                        for (unsigned n = 0; n < info.num_fences; n++)
+                            if (fences[n].status == 1 &&
+                                fences[n].timestamp_ns > latest_ns)
+                                latest_ns = fences[n].timestamp_ns;
+                        if (latest_ns)
+                            kernel_ns[eye] =
+                                mp_time_ns_from_raw_time(latest_ns);
+                    }
+                }
+#endif
+            }
+            pfd[eye].fd = -1;
+        }
+    }
+    // Close even on timeout/error, exactly once, never the KMS-owned fd.
+    close(sample->fence_fd[0]);
+    close(sample->fence_fd[1]);
+    MP_INFO(drm, "Stereo GPU probe: generation=%llu frame_id=%llu "
+            "cpu_render_L_ms=%.3f cpu_render_R_ms=%.3f "
+            "egl_swap_L_ms=%.3f egl_swap_R_ms=%.3f "
+            "fence_export_L_ms=%.3f fence_export_R_ms=%.3f "
+            "fence_observed_L_age_ms=%.3f fence_observed_R_age_ms=%.3f "
+            "fence_kernel_L_age_ms=%.3f fence_kernel_R_age_ms=%.3f "
+            "(age relative to published pair; negative kernel age is possible; "
+            "-1 means unavailable)\n",
+            (unsigned long long)sample->generation,
+            (unsigned long long)sample->frame_id,
+            sample->render_ns[0] / 1000000.0,
+            sample->render_ns[1] / 1000000.0,
+            sample->egl_swap_ns[0] / 1000000.0,
+            sample->egl_swap_ns[1] / 1000000.0,
+            sample->fence_export_ns[0] / 1000000.0,
+            sample->fence_export_ns[1] / 1000000.0,
+            observed_ns[0] ? (observed_ns[0] - sample->pair_published_ns) / 1000000.0 : -1.0,
+            observed_ns[1] ? (observed_ns[1] - sample->pair_published_ns) / 1000000.0 : -1.0,
+            kernel_ns[0] ? (kernel_ns[0] - sample->pair_published_ns) / 1000000.0 : -1.0,
+            kernel_ns[1] ? (kernel_ns[1] - sample->pair_published_ns) / 1000000.0 : -1.0);
 }
 
 static void stereo_async_print_stats(const struct drm_stereo_async_event *event)
@@ -358,6 +466,9 @@ static void *stereo_async_log_worker(void *opaque)
         case DRM_STEREO_ASYNC_STATS: stereo_async_print_stats(&event); break;
         case DRM_STEREO_ASYNC_GAP: stereo_async_print_gap(q->owner, &event.gap); break;
         case DRM_STEREO_ASYNC_DROP: stereo_async_print_drop(q->owner, &event.drop); break;
+        case DRM_STEREO_ASYNC_GPU_PROBE:
+            stereo_async_print_gpu_probe(q->owner, &event.gpu_probe);
+            break;
         }
     }
     return NULL;

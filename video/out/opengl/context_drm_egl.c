@@ -1289,6 +1289,8 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
                 return;
             }
         }
+        const int64_t fence_export_duration_ns =
+            mp_time_ns() - fence_export_start_ns;
         if (eye == 1 && s->gpu_wait) {
             // EGL swap queues GPU work, but the BO can still be busy when
             // atomic KMS tries to scan it out. Experimentally wait for
@@ -1336,10 +1338,29 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
         s->building.fence_fd[eye] = fence_fd;
         s->building.egl_swap_ns[eye] = egl_swap_duration_ns;
         s->building.fence_export_ns[eye] =
-            mp_time_ns() - fence_export_start_ns;
+            fence_export_duration_ns;
         if (eye == 1 && s->building.bo[0] && s->building.bo[1]) {
             s->building.generation = ++s->next_generation;
             s->building.ready_ns = mp_time_ns();
+            // Sample every 16 full pairs. The queue owns duplicate fence
+            // descriptors; their completion is measured away from the
+            // 120Hz SCHED_FIFO KMS thread. No sampling in quiet mode.
+            if (s->native_fence && drm->opts && drm->opts->stereo_stats &&
+                (s->building.generation % 16 == 0)) {
+                vo_drm_stereo_log_gpu_probe(drm, &(struct drm_stereo_gpu_probe) {
+                    .generation = s->building.generation,
+                    .frame_id = s->building.frame_id,
+                    .fence_fd = {s->building.fence_fd[0],
+                                 s->building.fence_fd[1]},
+                    .pair_published_ns = s->building.ready_ns,
+                    .render_ns = {s->building.render_ns[0],
+                                   s->building.render_ns[1]},
+                    .egl_swap_ns = {s->building.egl_swap_ns[0],
+                                    s->building.egl_swap_ns[1]},
+                    .fence_export_ns = {s->building.fence_export_ns[0],
+                                        s->building.fence_export_ns[1]},
+                });
+            }
             if (s->freeze_pair && s->active.bo[0]) {
                 // A/B isolation test: preserve producer-side GPU load
                 // (decode + rendering of BOTH stereo eyes), but never

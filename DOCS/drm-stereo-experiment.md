@@ -4096,3 +4096,28 @@ report `Stereo plan hold final` counters, movie frame-ID gaps, and
 build media-clock deadline skipping before enabling it as a default.
 CPU measurements of renderer / EGL swap / fence-export calls describe CPU
 command-submission work, not actual GPU completion.
+
+
+
+### Sampled GPU fence completion diagnostics
+
+With `--drm-stereo-stats=yes`, one of every 16 newly rendered pairs
+produces a `Stereo GPU probe:` diagnostic. While the completed pair is
+still safely owned by the producer, the logger duplicates both native
+sync_file FDs; the ordinary-priority logger, NOT the SCHED_FIFO KMS
+thread, polls them (max 100ms), optionally obtains dma_fence timestamp_ns
+via SYNC_IOC_FILE_INFO (Linux), then closes its duplicate FDs.
+The probe reports CPU draw, EGL swap and fence export durations separately
+for L/R and both *observed* and (if supported) kernel-recorded fence
+completion age relative to pair publication. Note `mp_time_ns` is based
+on raw monotonic time with a process offset; kernel timestamp_ns is
+converted to that timebase. Negative kernel age means a fence was already
+signaled before both eyes were published. -1 indicates unavailable.
+The observed poll time is a completion **upper bound**, not a precise GPU
+completion time.
+
+The worker's normal-priority logging can be arbitrarily delayed without
+holding the KMS scanout mutex or GBM buffers. Duplicate sync_file FDs
+are always closed on completion, failure or timeout. Default quiet mode
+records no probes. The existing async logger counts lost diagnostic
+events separately from video frames and page flips.

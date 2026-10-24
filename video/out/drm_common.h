@@ -156,6 +156,16 @@ struct drm_stereo_pts_sample {
 struct drm_stereo_async_log;
 
 // Immutable scalar diagnostic event. Never store pointers to GBM/DRM buffers.
+struct drm_stereo_gpu_probe {
+    uint64_t frame_id;
+    uint64_t generation;
+    int fence_fd[2]; // existing KMS-owned sync_file fds; duplicate on enqueue
+    int64_t pair_published_ns; // mpv CPU monotonic clock
+    int64_t render_ns[2];
+    int64_t egl_swap_ns[2];
+    int64_t fence_export_ns[2];
+};
+
 struct drm_stereo_async_drop {
     const char *reason; // Fixed string literals owned by the caller.
     uint64_t count, pending_gen, active_gen, frame_id;
@@ -390,6 +400,10 @@ void vo_drm_wakeup(struct vo *vo);
 // Nonblocking diagnostics: safe while stereo.mutex is held.
 void vo_drm_stereo_log_drop(struct vo_drm_state *drm,
                              const struct drm_stereo_async_drop *drop);
+// Sampled only. The logger duplicates both sync_file descriptors and
+// waits in its normal-priority worker, never on the KMS/GL threads.
+void vo_drm_stereo_log_gpu_probe(struct vo_drm_state *drm,
+                                  const struct drm_stereo_gpu_probe *probe);
 
 bool vo_drm_acquire_crtc(struct vo_drm_state *drm);
 void vo_drm_release_crtc(struct vo_drm_state *drm);
