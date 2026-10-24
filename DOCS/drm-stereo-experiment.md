@@ -4954,3 +4954,91 @@ submitted pending first-L commit concurrently with a
 VO reset). The next validation is ordinary pause/seek
 with the stress-only test hold variable unset, followed
 by long-running end-of-file and reconfiguration checks.
+
+
+### Post-seek-reset ordinary IPC stress with pause-aware PTS metrics: PASS
+
+Artifacts: `mpv-stereo-ipc-stress-20261024-232235-336840.log`
+and `.jsonl`, binary `v0.41.0-dev-g67b4f064d`;
+run with `QUEUE2=1 PLAN_HOLD=1`, *without* the artificial
+`QUEUE_TEST_HOLD_MS` injection. Script started the film
+at 295s, ran 140s wall-clock including 18 IPC actions:
+5 pause/resume pairs and 8 seeks. Every IPC action
+succeeded, all 8 seeks settled; player exited normally
+(`code=0`).
+
+During the first 6s pause, `time-pos` remained fixed
+at 306.681s; an exact relative -40s seek *while still paused*
+changed time-pos 388.763->348.765s, preserving `pause=true`
+until explicitly resumed. Final mpv internal
+`avsync=-0.002434s` (~-2.43ms), `vo-delayed-frame-count=0`.
+This does not measure absolute audio-to-photon sync.
+
+**Physical correctness:** 16,751 KMS flips,
+`missed_vblanks=0 parity_errors=0 wrong_eye=0
+wrong_hold=0 commit_errors=0 fence_errors=0`.
+2,890 rendered pairs, 2,885 first-L and first-R
+confirmations. `pair_unpresented_discards=0
+pair_update_skips=0`, no dropped incoming
+generations. This is an interactive test; the difference
+in counts is consistent with intentional queue flushes
+and the final pending pair, not a claim that all
+decoded frames were physically presented.
+
+**Queue correctness:** 974 second-slot enqueues and
+974 promotions, `full_skips=0 gbm_skips=0
+unexpected_incoming=0`; final `remaining_pending=1`,
+`remaining_queued=0` at the pre-release shutdown snapshot.
+The seek/reset diagnostic confirms 11 VO resets,
+four flushing an occupied `pending`, none needing a
+`queued` flush in this non-forced timing run;
+`building_flushes=0`. Unlike the preceding forced
+case, the empty second slot at the instant of seek
+is ordinary and expected.
+
+**Pause-aware diagnostic fix validated:** 5 physical
+idle gaps over 500ms, totaling **15.050s**,
+became new PTS segments (`long_gap_resets=5`,
+`long_gap_ust_s=15.050`); combined summary
+`segments=14 discontinuities=13` reflects the
+eight commanded seeks plus five long gaps.
+`relative_drift_last_ms=+24.498`, instead of
+the previous ordinary IPC test's ~+6,047ms
+pause-contaminated endpoint. This is a raw
+UST-versus-source-PTS *relative* statistic after
+segmenting, not absolute A/V latency. Initial and
+last media-PTS and UST spans in the summary still
+span all segments and **must not** be directly
+compared for time drift under seeks.
+
+**Pacing:** `adjacent_compared=2869 exact=2846
+mismatched=23` (**99.198%** exact), signed-error
++13 cycles and absolute-error 23 cycles.
+The previous pre-pause-aware ordinary IPC test
+showed 2850/2876 (~99.10%), 26 mismatches and
++900 signed-error cycles. Now 1/2/3/4+ actual
+cycles histogram=0/1412/1433/26.
+Of the sparse first-L samples, confirmed startup
+frame IDs 36, 37, and 40 already account for three
+mismatches; the remaining mismatches cannot be
+uniquely located to resume/seek boundaries from
+the bounded once-per-120-frame diagnostic history.
+The one `frame_id_gaps=1` is again startup
+frame 37->39, not a FIFO discard during seek.
+The 99.2% aggregate describes a dynamic stress
+test, not the separate 15-minute steady-state
+99.981% pacing baseline.
+
+All 8 seek-settled IPC events succeeded and the
+last internal AV sync was -2.43ms. The only
+`Failed to commit atomic request: Error number 22`
+occurs after final KMS metrics during CRTC mode
+restoration, not during playback. Nothing in this
+test calls for new changes to the RT KMS scheduler
+or the published two-slot queue implementation.
+
+Next optional tests before making these flags
+the default: exact seek while an in-flight FIRST-L
+commit is pending; rate change and reverse trick
+play; EOF/next-file reconfiguration; repeat
+runs without the forced hold and with stats off.
