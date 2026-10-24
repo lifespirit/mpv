@@ -4395,3 +4395,56 @@ already consumes all three BOs per eye; a producer cannot blindly
 render a fourth generation. Require bounded buffering, explicit
 late-frame selection and measured impact on audio/video latency,
 rather than silently introducing unbounded presentation delay.
+
+
+### Experimental two-slot FIFO for late RIGHT-fence pairs
+
+After the 20 loss samples in the `f102d6c65` test, the opt-in
+`MPV_DRM_STEREO_TWO_SLOT_QUEUE=1` prevents a newer producer frame
+from automatically replacing an older complete unpublished pair.
+
+States: `active` (KMS scanout), `pending` (oldest unpublished),
+`queued` (one additional unpublished pair). A completed new pair
+enters pending if empty, otherwise queued if empty. On successful
+LEFT atomic commit only, KMS selects pending as the next active
+generation and advances queued to pending. The previous active BOs
+remain held until the flip callback confirms the transition and the
+VO producer drains retired buffers. No eye-specific promotion or
+pair mixing is introduced.
+
+Bounded admission: `vo_drm_stereo_pair_can_capture` returns false
+when both pending slots are full, OR when either GBM eye surface
+has no free buffers. Under this mode it **never evicts** pending to
+make room; the upstream producer skips the new draw without waiting
+for a 120Hz event or blocking the real-time KMS thread. All accepted
+pairs retain their original sync_file fences and source PTS metadata.
+Cleanup also releases the new queued BOs/FDs.
+
+`Stereo two-slot queue final` adds `second_enqueues`,
+`second_promotions`, `full_skips`, `gbm_skips`,
+`unexpected_incoming`, `remaining_pending` and
+`remaining_queued` counters. Cross-compare these with
+`frame_id_gaps`, `pair_update_skips`, the PTS drift, planned/actual
+hold matrix, and missed_vblanks / wrong_eye / KMS commit_errors.
+`full_skips` and `gbm_skips` can count repeated attempts to draw
+the same movie picture; they are NOT directly unique source-frame
+drop counts.
+
+This is the first bounded queue experiment, OFF by default.
+It intentionally separates pair-retention correctness from a later
+media-clock-anchored deadline scheduler. The FIFO could retain
+frames longer than is useful for A/V sync. Do not enable it together
+with `PLAN_HOLD`, `RENDER_WAKE_EYE` or
+`KEEP_READY_PENDING` during the initial A/B. In the unlikely event
+of enabling both KEEP_READY_PENDING and TWO_SLOT_QUEUE, two-slot FIFO
+takes precedence.
+
+Test with the previous clockfix 120s baseline (same mpv options,
+source offset and DP 120Hz mode), while unsetting all other
+experimental variables; on the new run set ONLY
+`MPV_DRM_STEREO_TWO_SLOT_QUEUE=1`.
+
+Safety: this code has been reviewed by inspection, not compiled on
+the target i915 Arch system; treat it as experimental. Stop and
+report if there are compile errors, GBM front-buffer failures,
+KMS commit errors, visible A/V latency or playback freeze.
