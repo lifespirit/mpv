@@ -418,3 +418,104 @@ scanout position remain unknown. Next milestone is an
 optical measurement with a controlled Half-SBS test
 pattern and sensor/high-speed camera, with both eye
 channels characterized independently.
+
+
+## Optical phase measurement fixture (added after zero-loss transport PASS)
+
+The standalone generator
+[`TOOLS/drm_stereo_optical_fixture.py`](../TOOLS/drm_stereo_optical_fixture.py)
+creates a constant-per-frame, deterministic Half-SBS H.264 Matroska
+clip with four equal phases:
+
+| Interval (default) | Left movie eye | Right movie eye | Measurement purpose |
+| --- | --- | --- | --- |
+| 0–5 s | WHITE | BLACK | Left/right lens opening versus white eye scanout |
+| 5–10 s | BLACK | WHITE | Verify inverted content and swapped shutters |
+| 10–15 s | WHITE | WHITE | Independently measure the shutter transmission waveform |
+| 15–20 s | BLACK | BLACK | Background light/dark leakage baseline |
+
+The test clip is generated from a 1920x1080 @ 24000/1001 Hz
+source; each of its two 960x1080 Half-SBS halves is pure
+white or black (no picture motion). The script writes a
+`stereo_mode=left_right` stream tag, but native stereo
+requires `--drm-stereo-3d=yes` explicitly regardless of tags.
+
+**Generate from the checked-out mpv repository** (needs
+FFmpeg with `libx264`):
+
+```sh
+python3 TOOLS/drm_stereo_optical_fixture.py /tmp/drm-optical-sbs.mkv
+ffprobe -v error -select_streams v:0 \
+  -show_entries stream=width,height,r_frame_rate:stream_tags=stereo_mode \
+  -of default=noprint_wrappers=1 /tmp/drm-optical-sbs.mkv
+```
+
+The generator was tested on a 640x360 four-second
+`--phase-seconds 1` sample by decoding frames at
+0.5, 1.5, 2.5 and 3.5 seconds: sampled left/right center
+RGB values were respectively
+`(255,0)`, `(0,255)`, `(255,255)`, `(0,0)`
+(in terms of per-half 8-bit brightness); the video
+codec and `stereo_mode` metadata were verified with
+`ffprobe`. It has **not yet been played on target KMS
+with lenses/sensors**. Re-running the generator with
+an existing output requires `--overwrite`.
+
+**Run in native DRM stereo** after a successful hardware
+startup-gated transport smoke test (free TTY and direct
+DRM master access). Set paths to your actual local files:
+
+```sh
+MPV_DRM_STEREO_USB=1 \
+MPV_DRM_STEREO_USB_LIBRARY=/path/to/libnvstusb/src/.libs/libnvstusb.so \
+MPV_DRM_STEREO_USB_FIRMWARE=/path/to/libnvstusb/nvstusb.fw \
+  ./build/mpv --no-config --vo=gpu --gpu-context=drm \
+  --drm-connector=DP-1 --drm-mode=2560x1440@120 \
+  --drm-vrr-enabled=no --drm-stereo-3d=yes \
+  --video-sync=display-resample --drm-stereo-pacing-eye=right \
+  --drm-stereo-stats=no --no-audio --no-sub \
+  --log-file=/tmp/mpv-drm-optical-phase.log \
+  /tmp/drm-optical-sbs.mkv
+```
+
+**Measurement procedure:** Preferred acquisition uses
+three independently sampled photodiodes/phototransistors
+and a multi-channel oscilloscope or logic analyzer with
+appropriate analogue acquisition: a direct monitor
+white/black reference, light transmission through the
+left lens, and light transmission through the right lens.
+Place sensing areas at essentially the same vertical
+position on the screen. A rolling-scanned LCD panel adds
+its own scanout location and pixel response delay.
+Use the first 10s phases to establish which shutter is
+open during the bright LEFT vs RIGHT physical scanout.
+The BOTH-WHITE section isolates each shutter's open/closed
+duty wave from the content brightness; the BOTH-BLACK
+section establishes ambient/dark leakage. Quantify per
+eye: time of rising/falling light edge versus reference,
+duty cycle, L/R inversion, jitter, optical crosstalk and
+stability. Keep the recorder and sample index consistent
+across phase transitions. A high-speed camera can provide
+a qualitative first look, but typical 240fps or
+rolling-shutter recordings do **not** reliably establish
+sub-millisecond optical phase; photodiodes/scope are
+strongly preferred for calibration.
+
+Interpretation caveats:
+
+- KMS UST describes GPU/display page flip, not
+  illumination at a fixed scan line; first control for
+  panel scanout and pixel response.
+- A 0.3ms USB-call duration is NOT equivalent to
+  0.3ms IR or lens delay. The firmware's own
+  shutter waveform may be independent of individual
+  `nvstusb_send_eye` packet submission edges.
+- If the shutters open systematically late, do not
+  insert an arbitrary phase offset or blocking sleep
+  in the KMS callback. Instead first quantify
+  panel-to-lens delay and jitter, then design a
+  nonblocking predicted-next-MSC USB scheduler.
+- Optical checks are separate from the already-passing
+  transport assertions; `optical_phase_verified=false`
+  remains correct until physical lens transmission is
+  measured and documented.
