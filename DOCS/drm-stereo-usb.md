@@ -519,3 +519,124 @@ Interpretation caveats:
   transport assertions; `optical_phase_verified=false`
   remains correct until physical lens transmission is
   measured and documented.
+
+
+## Observed variable optical phase across independent runs (2026-10-25)
+
+Source: `mpv-drm-optical-phase.log` from the
+four-phase 20s `drm-optical-sbs.mkv` fixture on
+`v0.41.0-dev-gecd430816` / i915 / Intel Iris Xe /
+Mesa 26.2.5 at 2560x1440@120Hz. The user visually
+reported three distinct *between-run* outcomes through
+the shutter glasses: apparently well-synchronized;
+mostly correct black/white with a small contaminated
+patch at the TOP; and a misaligned horizontal boundary
+covering roughly HALF the test square.
+
+**This is a real functional optical defect despite fully
+successful software/USB transport.** In the uploaded last
+run, mpv reported `confirmed=2399 sent=2399
+startup_skipped=0 skipped_msc=0 unaccounted=0
+usb_errors=0 wake_errors=0 late_gt_2ms=0
+late_gt_period=0`, with `max_usb_transfer_ms=1.130`.
+The KMS worker recorded `flips=2399
+missed_vblanks=0 parity_errors=0 wrong_eye=0
+wrong_hold=0 commit_errors=0 fence_errors=0
+pair_unpresented_discards=0`, and the plan was
+`exact=477/477` (100%). The emitter was ready
+at t=0.450s and first KMS atomic flip submitted
+at t=0.568s. The initial readiness gate worked.
+
+Thus the observations cannot be attributed to
+a logged missed KMS vblank, KMS eye swap, or a dropped
+USB bulk OUT. They are consistent with a relative
+optical shutter phase/raster scanout mismatch;
+at 120Hz, half the 8.33ms period is ~4.17ms, so
+a roughly half-height horizontal boundary is a
+plausible *order-of-magnitude* indicator. It is
+NOT a calibrated measurement: LCD rolling scanout,
+pixel transitions, emitter timing and the shutter
+receiver's acquisition and latency are all unknown.
+The exact position and variation between launches
+cannot be determined from this log alone.
+
+**Important instrumentation correction:** the old
+`max_scanout_to_send_ms=0.000` only updated with
+positive `CLOCK_MONOTONIC - DRM UST` values, and
+the per-second DRM debug log showed many negative
+callback lags. Zero was therefore not proof of zero
+real delay; it can result from all signed samples
+being negative. Subsequent code records
+`signed_lag_samples`, `signed_lag_negative`, and
+`min_signed_scanout_to_send_ms` /
+`max_signed_scanout_to_send_ms` without changing
+sender pacing. The old periodic KMS string
+`(USB disabled)` was also misleading and has
+been clarified as separate KMS-vs-USB accounting.
+
+**One-variable optical A/B experiment:** an
+*independent, optional* calibration-only branch of
+`lifespirit/libnvstusb`,
+`feature/usb-eye-timer-calibration`, exposes
+`NVSTUSB_EYE_TIMER_US`. The lib originally
+sends `r = NVSTUSB_T2_COUNT((1e6/rate)/1.8)`
+with each shutter eye command; at 120Hz its
+numeric Timer-2 argument is about 4630µs.
+What this timer does to real IR/lens phase is
+NOT proven. The new variable overrides this
+firmware command parameter only, preserving
+the original value when unset; the separate
+firmware timing/profile parameters remain
+unchanged. This does NOT change KMS parity,
+MSC scheduling or the USB callback. No
+optical test has yet been performed with
+the override; it is purely a diagnostic.
+
+Build locally, in the `libnvstusb` checkout:
+
+```sh
+git fetch origin feature/usb-eye-timer-calibration
+git switch --track origin/feature/usb-eye-timer-calibration
+make -j"$(nproc)"
+```
+
+Then from the mpv checkout, use the same optical
+fixture command in this document, plus exactly one
+variable on each independent run:
+
+```sh
+NVSTUSB_EYE_TIMER_US=3500 \
+MPV_DRM_STEREO_USB=1 \
+MPV_DRM_STEREO_USB_LIBRARY=/absolute/path/to/libnvstusb/src/.libs/libnvstusb.so \
+MPV_DRM_STEREO_USB_FIRMWARE=/absolute/path/to/libnvstusb/nvstusb.fw \
+./build/mpv --no-config --vo=gpu --gpu-context=drm \
+  --drm-connector=DP-1 --drm-mode=2560x1440@120 \
+  --drm-vrr-enabled=no --drm-stereo-3d=yes \
+  --video-sync=display-resample --no-audio --no-sub \
+  --log-file=/tmp/mpv-optical-eye-timer-3500.log \
+  /tmp/drm-optical-sbs.mkv
+```
+
+Repeat independently at 3500, 4500 and 5500µs
+and with the variable **unset** (historical baseline),
+ideally at least three runs per setting. Keep
+`MPV_DRM_STEREO_USB_INVERT_EYES` unchanged.
+Record for each run: which of the first two
+phases showed clean black/white, approximate height
+of any horizontal contaminated stripe, whether
+the stripe was stationary or moved during the
+20s test, and whether the two lenses behaved
+symmetrically. A camera/sensor observing *through*
+each lens is preferred; do not wear the glasses
+during phase-calibration experiments.
+
+If changing the timer moves the contamination
+boundary consistently within a run, investigate
+the firmware timer's real phase effect and measure
+with a photodiode before deciding on calibration.
+If the boundary changes unpredictably *between*
+runs with the same timer, first investigate emitter
+receiver lock/acquisition and startup synchrony.
+A constant offset alone will not correct random
+phase lock or drift. No KMS scheduler modification
+is justified by the current transport-perfect log.
