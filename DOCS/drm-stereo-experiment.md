@@ -4736,3 +4736,68 @@ A further functional test could seek repeatedly *while
 the 2-slot queue is intentionally occupied* (rather than
 relying on incidental timing), and cover playback speed
 and end-of-file state changes.
+
+
+### Pause-aware PTS diagnostics and forced occupied-queue seek
+
+Starting at commit `c07b262`, the confirmed-FIRST-LEFT diagnostic
+starts a fresh PTS/MSC segment whenever the interval since the
+previous confirmed FIRST-LEFT presentation exceeds **500ms**, even if
+the source PTS is monotonic and frame IDs are adjacent. This
+distinguishes *wall-clock time with no new movie frame* (pause,
+possible stall or other idle) from genuine source-frame hold.
+A qualifying gap does not increment the 2/3-cycle histogram or
+the planned-hold comparison matrix and does not add to the current
+segment's raw PTS-relative drift. `Stereo PTS final` now reports
+`long_gap_resets` and `long_gap_ust_s`, alongside the old total
+`segments` and `discontinuities`. The threshold is deliberately
+conservative; the event is called a long idle gap, not proof of
+an explicit user pause. Global scanout and raw-media PTS spans
+remain global for compatibility. The KMS flip path, PTS plan and
+BO ownership are unchanged by this telemetry-only change.
+
+A second, independently opt-in mode, starting at `15d97c9`,
+makes an otherwise timing-dependent seek reproducible. Set
+`MPV_DRM_STEREO_QUEUE_TEST_HOLD_MS=750` (valid 100..2000)
+with `TWO_SLOT_QUEUE=1` and `PLAN_HOLD=1`.
+After the **first** new pair enters `queued` while another
+remains in `pending`, a one-shot deadline postpones
+future **promotions** of pending for 750ms.
+The physical 120Hz L/R worker continues to flip `active`
+without blocking or sleeping on GPU, GBM or IPC. On the
+producer thread, a single diagnostic marker is printed:
+`Stereo queue test occupied: pending_frame_id=... queued_frame_id=... hold_ms=750`.
+The test harness watches for that marker and sends JSON IPC
+`seek ... absolute+exact` immediately, while this special
+promotion gate is active. At exit,
+`Stereo queue test final: hold_ms=750 triggered=1 hold_blocks=...`
+confirms arming and counts suppressed eligible L promotions.
+
+**Important:** the hold injection intentionally simulates a
+brief video backlog. It may cause `queue_full_skips`,
+PTS discontinuities, additional held frames or visible A/V
+stall, even on a correct driver. It is NOT a jitter, dropped-frame
+or playback-quality benchmark. Run it only in a dedicated
+reproducibility test, NEVER in production. Explicitly unset
+`MPV_DRM_STEREO_QUEUE_TEST_HOLD_MS` for every regular A/B test.
+
+The accompanying updated `mpv_stereo_ipc_stress.py` can be run
+as `./mpv_stereo_ipc_stress.py --occupied-seek`.
+It starts mpv with 750ms hold enabled, waits for the occupancy
+marker, sends an absolute seek to media position 900s before doing
+slow property reads, verifies that the requested position settles,
+plays for 10 seconds, seeks back to the initial position and plays
+another 10 seconds, then gracefully quits to capture final
+stereo statistics. `--occupied-hold-ms` and
+`--occupied-target` customize the stress case.
+The original pause/resume/seeking suite remains the default
+when `--occupied-seek` is omitted.
+
+Look for outdated pre-seek pending/queued generations being
+promoted after the seek boundary, queue pressure or unbounded
+resumption delay; correlate the IPC `.jsonl` action timestamp
+against the two-slot marker and `Stereo PTS sample` segment
+boundaries. This targeted test is not yet validation that all
+seek paths always flush stale pending BOs; if it reveals such a
+race, fix producer seek/reset handling while retaining KMS
+framebuffer lifetime safety.
