@@ -123,6 +123,13 @@ struct stereo_kms {
     bool two_slot_queue; // Experimental bounded two-entry FIFO.
     uint64_t queue_second_enqueues, queue_second_promotions;
     uint64_t queue_full_skips, queue_gbm_skips, queue_unexpected_incoming;
+    // One-shot, explicit stress-test-only KMS promotion gate. It never
+    // stops physical L/R flips: only holds pending while both slots are
+    // occupied, giving the IPC test time to issue a seek.
+    int queue_test_hold_ms;
+    int64_t queue_test_hold_until_ns;
+    bool queue_test_triggered;
+    uint64_t queue_test_hold_blocks;
     // eglSwapInterval is per EGL draw surface, not per display/context.
     // The legacy stereo init sets interval 0 on the left surface only.
     // Opt-in experiment: explicitly set the right surface to 0 too.
@@ -927,6 +934,12 @@ static void *stereo_kms_thread(void *arg)
         } else if (eligible && s->plan_hold && !s->active.first_left_confirmed) {
             drm->stereo_pair_plan_anchor_missing++;
         }
+        if (eligible && s->queue_test_hold_ms &&
+            s->queued.bo[0] &&
+            mp_time_ns() < s->queue_test_hold_until_ns) {
+            eligible = false;
+            s->queue_test_hold_blocks++;
+        }
         bool fences_ready = true;
         if (eligible && s->native_fence) {
             drm->stereo_pair_fence_checks++;
@@ -1430,6 +1443,8 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
         // under mutex but its GBM buffers are released on the producer
         // AFTER unlocking. Never hold up 120Hz KMS on GBM teardown.
         struct stereo_pair overwritten = {0};
+        bool queue_test_occupied = false;
+        uint64_t queue_test_pending_id = 0, queue_test_queued_id = 0;
         pthread_mutex_lock(&s->mutex);
         if (s->building.bo[eye]) {
             if (s->building.fence_fd[eye] > 0)
@@ -1486,6 +1501,17 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
                     // missed L boundary; retain it until the next L edge.
                     s->queued = s->building;
                     s->queue_second_enqueues++;
+                    if (s->queue_test_hold_ms && !s->queue_test_triggered) {
+                        // Armed exactly once per mpv lifetime. This state
+                        // transition and the deadline are committed under
+                        // the SAME mutex the KMS thread uses.
+                        s->queue_test_triggered = true;
+                        s->queue_test_hold_until_ns = mp_time_ns() +
+                            (int64_t)s->queue_test_hold_ms * 1000000;
+                        queue_test_pending_id = s->pending.frame_id;
+                        queue_test_queued_id = s->queued.frame_id;
+                        queue_test_occupied = true;
+                    }
                 } else {
                     // Should be unreachable: can_capture() refuses a
                     // full queue. Never overwrite accepted generations.
@@ -1534,6 +1560,16 @@ static void drm_egl_swap_buffers(struct ra_ctx *ctx)
             pthread_cond_signal(&s->ready);
         }
         pthread_mutex_unlock(&s->mutex);
+        if (queue_test_occupied) {
+            // This one producer-thread log (never the RT KMS thread)
+            // allows an external JSON IPC stress harness to seek while
+            // both unpublished generations are deliberately retained.
+            MP_INFO(ctx, "Stereo queue test occupied: pending_frame_id=%llu "
+                    "queued_frame_id=%llu hold_ms=%d\n",
+                    (unsigned long long)queue_test_pending_id,
+                    (unsigned long long)queue_test_queued_id,
+                    s->queue_test_hold_ms);
+        }
         if (overwritten.bo[0])
             stereo_release_pair(p, &overwritten);
         return;
@@ -1661,6 +1697,10 @@ static void drm_egl_uninit(struct ra_ctx *ctx)
                         (unsigned long long)s->queue_gbm_skips,
                         (unsigned long long)s->queue_unexpected_incoming,
                         s->pending.bo[0] != NULL, s->queued.bo[0] != NULL);
+                MP_INFO(ctx, "Stereo queue test final: hold_ms=%d "
+                        "triggered=%d hold_blocks=%llu\n",
+                        s->queue_test_hold_ms, s->queue_test_triggered,
+                        (unsigned long long)s->queue_test_hold_blocks);
                 MP_INFO(ctx, "Stereo plan hold final: enabled=%d "
                         "early_blocks=%llu due_promotions=%llu "
                         "late_promotions=%llu anchor_missing=%llu\n",
@@ -2045,6 +2085,21 @@ static bool drm_egl_init(struct ra_ctx *ctx)
         MP_INFO(ctx, "Stereo experimental two-slot pending FIFO enabled\n");
         if (p->stereo.keep_ready_pending)
             MP_WARN(ctx, "TWO_SLOT_QUEUE supersedes KEEP_READY_PENDING\n");
+    }
+    const char *queue_test_hold = getenv("MPV_DRM_STEREO_QUEUE_TEST_HOLD_MS");
+    if (queue_test_hold && p->stereo.two_slot_queue) {
+        char *end = NULL;
+        long ms = strtol(queue_test_hold, &end, 10);
+        if (end != queue_test_hold && *end == '\0' &&
+            ms >= 100 && ms <= 2000) {
+            p->stereo.queue_test_hold_ms = ms;
+            MP_WARN(ctx, "Stereo stress test: gate first occupied "
+                    "two-slot FIFO for %ldms (physical L/R continues; "
+                    "intentional A/V stall)\n", ms);
+        } else {
+            MP_WARN(ctx, "Invalid QUEUE_TEST_HOLD_MS='%s' (100..2000)\n",
+                    queue_test_hold);
+        }
     }
     const char *right_swap_zero = getenv("MPV_DRM_STEREO_RIGHT_SWAP_INTERVAL_ZERO");
     p->stereo.right_swap_interval_zero = p->stereo.enabled &&
