@@ -1002,10 +1002,21 @@ static void restore_sdr(struct vo_drm_state *drm)
         return;
 
     struct pl_color_space sdr = pl_color_space_srgb;
-    vo_drm_set_color(drm->vo, &sdr);
-    int ret = drmModeAtomicCommit(drm->fd, atomic_ctx->request, DRM_MODE_ATOMIC_ALLOW_MODESET, drm);
-    if (ret)
-        MP_VERBOSE(drm, "Failed to commit atomic request: %s\n", mp_strerror(ret));
+    // No atomic properties need updating when the output is already SDR.
+    // In particular, the independent stereo KMS worker uses its own
+    // atomic requests, so atomic_ctx->request may be empty here; committing
+    // an empty request returns EINVAL on i915 during every VO teardown.
+    if (!vo_drm_set_color(drm->vo, &sdr))
+        return;
+    if (!atomic_ctx->request) {
+        MP_WARN(drm, "Cannot restore SDR colorspace: no atomic request\n");
+        return;
+    }
+    if (drmModeAtomicCommit(drm->fd, atomic_ctx->request,
+                            DRM_MODE_ATOMIC_ALLOW_MODESET, NULL)) {
+        MP_WARN(drm, "Failed to restore SDR colorspace: %s\n",
+                mp_strerror(errno));
+    }
 }
 
 static bool setup_connector(struct vo_drm_state *drm, const drmModeRes *res,
