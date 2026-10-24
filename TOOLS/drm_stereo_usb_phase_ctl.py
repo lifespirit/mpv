@@ -17,26 +17,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--parent", action="store_true",
                         help="Target the parent mpv process (for mpv input.conf 'run')")
-    parser.add_argument("pid", nargs="?", type=int,
-                        help="Running mpv PID (omit when --parent is set)")
-    parser.add_argument("command", nargs="?", help="get, +N, -N, or set:N (microseconds)")
+    parser.add_argument("arguments", nargs="*", help="PID + command, or command for --parent")
     opts = parser.parse_args()
 
-    # When invoked by mpv's 'run', use the parent's PID and treat
-    # the single positional argument as a command, not as a PID.
     if opts.parent:
-        arguments = sys.argv[1:]
-        if "--parent" in arguments:
-            arguments.remove("--parent")
-        if len(arguments) != 1:
+        if len(opts.arguments) != 1:
             parser.error("--parent needs one command (e.g. --parent +100)")
         pid = os.getppid()
-        command = arguments[0]
+        command = opts.arguments[0]
     else:
-        if opts.pid is None or opts.command is None:
+        if len(opts.arguments) != 2:
             parser.error("provide mpv PID and command")
-        pid = opts.pid
-        command = opts.command
+        try:
+            pid = int(opts.arguments[0])
+        except ValueError:
+            parser.error("PID must be an integer")
+        command = opts.arguments[1]
 
     if not (command == "get" or re.fullmatch(r"[+-][0-9]{1,4}", command)
             or re.fullmatch(r"set:[0-9]{3,4}", command)):
