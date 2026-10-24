@@ -1,5 +1,27 @@
 # Experimental DRM half-SBS frame-sequential output (no USB)
 
+> **Current native DRM-stereo defaults (2026-10-25):**
+> With `--drm-stereo-3d=yes`, `MPV_DRM_STEREO_TWO_SLOT_QUEUE`
+> and `MPV_DRM_STEREO_PLAN_HOLD` now **both default to enabled**.
+> The production mode needs **no environment variables** for these
+> policies. Set either one to `0` to disable it for regression testing,
+> or `1` to force it on. Invalid values warn and fall back to defaults.
+> With normal DRM 2D output both switches are ignored. The older
+> `MPV_DRM_STEREO_SBS=1 MPV_DRM_STEREO_PAIR=1` experimental
+> interface continues to default both policies off, and still accepts
+> explicit `=1`. This is a targeted rollout on the tested i915 path;
+> other GPU drivers and normal-mode regressions still need validation.
+> The document below preserves the *historical* opt-in experiments;
+> older sections saying "disabled by default" describe earlier revisions.
+>
+> Rebuild the branch after `474c53b`, then verify the init log contains
+> `Stereo scheduling policy: plan_hold=1 two_slot_queue=1 (native_3d=1`
+> when neither environment switch is set. For independent opt-out use
+> `MPV_DRM_STEREO_PLAN_HOLD=0` or
+> `MPV_DRM_STEREO_TWO_SLOT_QUEUE=0`. The injected
+> `MPV_DRM_STEREO_QUEUE_TEST_HOLD_MS` remains **test-only and off**.
+
+
 This is the first implementation checkpoint on branch
 `feature/drm-stereo-diagnostics`. It is an **opt-in visual/DRM timing
 experiment**: it does not load `libnvstusb`, does not address the

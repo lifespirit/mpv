@@ -690,6 +690,18 @@ Available video output drivers are:
         latency. Do not override the display FPS to the physical 120 Hz
         when using this mode. (default: no)
 
+        When native stereo is enabled, two presentation policies are on by
+        default: a bounded two-slot FIFO preserves accepted unpublished L/R
+        frame pairs, and planned MSC holds prevent promoting the next movie
+        frame before the previous frame has completed its requested L/R
+        cycles. For troubleshooting and A/B testing, these can be disabled
+        independently with ``MPV_DRM_STEREO_TWO_SLOT_QUEUE=0`` and
+        ``MPV_DRM_STEREO_PLAN_HOLD=0``; ``1`` explicitly enables each
+        policy. Other values produce a warning and use the default. These
+        settings do not change ordinary 2D output. The older opt-in
+        ``MPV_DRM_STEREO_SBS=1 MPV_DRM_STEREO_PAIR=1`` path keeps both
+        policies off by default to preserve historical A/B behavior.
+
     ``--drm-stereo-pacing-eye=<left|right>``
         Experimental choice of which confirmed physical eye refresh wakes
         mpv's logical 60 Hz display-synced frame scheduler when
