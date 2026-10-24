@@ -4658,3 +4658,81 @@ exercise pause/resume, seeks, speed changes, file ending,
 and real audio/video synchronization before enabling the
 two options by default. No evidence here warrants a
 new PTS/MSC correction feedback loop.
+
+
+### IPC pause/resume and seek stress: pass, with diagnostic caveats
+
+Test artifacts: `mpv-stereo-ipc-stress-20261024-224807-330991.log`
+and `.jsonl`, using `v0.41.0-dev-gc51dfaddc` built from the
+two-slot + PLAN_HOLD experiment. Duration ~140.07 s wall clock,
+starting media offset 295s. JSON IPC script ran 18 requested
+actions: 5 pause/resume pairs and 8 exact seeks (relative/absolute,
+including an exact seek *while paused*). Every action succeeded;
+all 8 application seeks emitted `seek` and `playback-restart`;
+application exited with `code=0`.
+
+Pause correctness: media `time-pos` stayed exactly 306.681s
+over the 6s pause, and after a paused seek to 348.723s the
+`pause` property remained true until explicit resume.
+Continuous 120Hz physical L/R scanning did not pause or lose
+a vblank (KMS continues to repeat the active pair).
+Relative seek from 388.722s to 348.723s while paused was
+correct; later startup/resume audio-video
+`avsync` snapshots can temporarily be ~-0.03 to -0.05s,
+but final sample `avsync=-0.000123s` (= -0.123ms)
+and `vo-delayed-frame-count=0`.
+
+Final KMS: `flips=16747 missed_vblanks=0 parity_errors=0
+wrong_eye=0 wrong_hold=0 commit_errors=0`; 2887 pairs
+rendered and 2887 confirmed new left and right generations.
+`pair_unpresented_discards=0 pair_update_skips=0`.
+FIFO `second_enqueues=1127 second_promotions=1127
+full_skips=0 gbm_skips=0 unexpected_incoming=0` and
+both queue slots were empty at exit; 26 native-fence
+deferrals and 0 native-fence errors. After exit, the
+known DRM atomic EINVAL during CRTC restoration is not
+a running flip error.
+
+**Important: final summary is not a steady-state cadence test.**
+`Stereo PTS final` has 9 segments and 8 media PTS
+discontinuities, matching the 8 commanded playback seeks.
+`frame_id_gaps=1` and `skipped_frame_ids=1` come from
+frame_id 37 -> 39 during initial startup (the first
+new-generation trace), NOT a mid-test pending queue discard.
+The source frame 38 was never an accepted published pair;
+cause of this upstream startup omission is not uniquely
+established by the existing telemetry. No loss in either
+pending slot during seek operations.
+
+`Stereo plan final`: 2850/2876 = **99.096%** exact
+previous-plan intervals with 26 mismatches,
+`signed_error_cycles=900 abs_error_cycles=910`. Comparing
+these global counters to the 99.981% steady-state test is
+invalid: KMS must keep flipping even while mpv is paused.
+Fifteen seconds of explicit paused time fall within
+otherwise continuous movie PTS segments
+(6s first pause + 3s before paused seek + 3 * 2s burst
+pauses); at 60 stereo cycles/s this accounts for ~900
+surplus physical cycles. Startup/seek intervals also
+contaminate the remaining hold comparisons.
+
+`relative_drift_last_ms=6046.769` is similarly not
+audio/video delay: the current PTS vs hardware UST statistic
+does not reset its time anchor across pause/resume.
+Three final 2-second pauses alone contribute about 6s
+to its final segment, and the IPC `avsync` settled to
+~0 by the end. Do not feed this unsegmented pause-included
+drift into a new KMS PTS controller.
+
+Conclusions: 2-slot retention, paired-eye scanout and
+planned-hold gating survive every tested pause/seek/resume
+transition without a KMS error, pending discard or GBM
+pressure. The existing diagnostic counters for PTS drift
+and aggregate cadence need *pause-aware segmenting* if
+one wants trustworthy global summary percentages under
+interactive playback. That observability fix should not
+alter KMS timing or promote from old queued generations.
+A further functional test could seek repeatedly *while
+the 2-slot queue is intentionally occupied* (rather than
+relying on incidental timing), and cover playback speed
+and end-of-file state changes.
