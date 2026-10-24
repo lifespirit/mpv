@@ -5162,3 +5162,81 @@ are warranted from this log. Remaining independent
 checks: explicit repeated idle/reload cycles for
 leak detection; and the DRM atomic CRTC restoration
 EINVAL on every teardown.
+
+
+### CRTC teardown EINVAL investigation and repeated EOF/idle soak test
+
+Investigation of the two verbose `Failed to commit atomic request:
+Error number 22 occurred` lines at 29.658s/40.030s in the
+2026-10-24 playlist lifecycle log traced them to
+`restore_sdr()` in `video/out/drm_common.c`, **not**
+to `vo_drm_release_crtc()` and **not** to the realtime
+stereo KMS worker. During teardown `restore_sdr()`
+unconditionally invoked `drmModeAtomicCommit()`,
+even when `vo_drm_set_color(..., sRGB)` reported
+that the display colorspace was already SDR.
+The independent stereo worker uses its own atomic
+requests, leaving the generic atomic request potentially
+empty. An empty atomic request commonly returns
+`EINVAL` on i915. The error logger also incorrectly
+passed the libdrm return value `-1` to `mp_strerror`,
+instead of logging `errno`.
+
+**Fix in `49ea1e7`:** skip the SDR restore atomic
+commit if `vo_drm_set_color()` returns false
+(no actual colorspace change). When a colorspace
+change IS requested, retain the commit and log
+failures with `errno`, with a specific warning
+`Failed to restore SDR colorspace: ...`. The
+normal `vo_drm_release_crtc()` old-state modeset
+restore remains separate and untouched. Neither
+the stereo KMS worker nor the buffer queue's
+L/R synchronization logic changed. Based on the
+source and previous logs, this addresses the
+spurious teardown EINVAL; a build and target i915
+retest is required to confirm.
+
+A companion standalone standard-library Python
+harness, `mpv_stereo_eof_idle_cycles.py`, repeats
+**25 cycles** by default using only the original
+Half-SBS video file. Each cycle:
+(1) JSON IPC `loadfile replace` from
+`--idle=yes` in the same mpv PID;
+(2) verify the source media time advances;
+(3) exact-seek to the last four seconds;
+(4) wait for genuine `end-file reason=eof`;
+(5) check `core-idle=true`, `path=null`,
+`playlist-pos=-1`; the playlist entry count may
+remain >0 in idle;
+(6) check dedicated `Stereo DRM final` and
+`Stereo two-slot queue final` exist for this
+cycle and contain zero missed vblank, wrong-eye,
+parity, KMS commit, GPU fence and queue-pressure
+failures; and
+(7) record the number of all FDs, DRM device FDs,
+sync_file FDs, DMA-BUF FDs, thread count and
+`VmRSS` in `/proc/<pid>` while playing and idle.
+The harness treats nonzero specialized DRM-related
+FDs in idle or any new restore error as a test
+failure. The `VmRSS` history is also exported as
+CSV with 25 data rows: gradual RSS change is a
+signal for investigation, not sufficient proof
+of a GBM memory leak because caching is involved.
+
+After `git pull --ff-only && meson compile -C build`
+run `./mpv_stereo_eof_idle_cycles.py --cycles 25`
+(or `--cycles 2` as a quick validation).
+No second movie file is needed. Main artifacts:
+`/tmp/mpv-stereo-eof-idle-cycles-*.log`,
+`.jsonl`, and `.csv`.
+Script Python syntax and fake-IPC two-cycle state
+machine have been tested; only the user machine
+can perform actual DRM/KMS verification.
+
+If the same EINVAL remains on the new build,
+inspect whether the output actually changes from
+HDR to SDR during teardown; the new warning will
+separate genuine SDR restore failures from failed
+old-mode restoration. Compare the new restore
+warning and DRM master/VT handling before altering
+the old CRTC state restoration sequence.
