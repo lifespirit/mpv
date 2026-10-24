@@ -5495,3 +5495,82 @@ A possible future diagnostic-only refinement
 would use explicit mpv pause-state transitions,
 rather than a wall-clock >500ms heuristic,
 to segment short pause bursts.
+
+
+### 2026-10-25: default-on policy opt-outs verified on i915 (all three pass)
+
+Tested binary `v0.41.0-dev-g52f962978`, Intel Iris Xe
+i915/Mesa 26.2.5 at DP-1 2560x1440@120Hz. IPC test
+`mpv_stereo_ipc_policy_test.py --scale 0.25` ran
+three policy modes independently. All 3 runs contain
+explicit `policy_verified` and `test_complete` events;
+each completed 18 IPC actions, including 5 pause/resume
+pairs and 8 exact seeks, with all seek settlements
+observed and mpv exit code 0. Every run confirmed
+`native_3d=1` and the *expected* actual runtime
+policy, not just its environment setting:
+
+| Policy | Requested env overrides | Reported hold/FIFO | KMS flips | Exact / compared MSC intervals | Unpresented pair discards |
+| --- | --- | --- | ---: | ---: | ---: |
+| default (previous run, 00:24:37) | none | 1/1 | 4308 | 698/711 = 98.17% | 0 |
+| no-plan (00:30:45; PID 349947) | `PLAN_HOLD=0` | 0/1 | 4289 | 377/709 = 53.17% | 0 |
+| no-queue (00:31:39; PID 350045) | `TWO_SLOT_QUEUE=0` | 1/0 | 4287 | 655/679 = 96.47% | 16 |
+| both-off (00:32:25; PID 350138) | both `=0` | 0/0 | 4273 | 510/701 = 72.75% | 5 |
+
+Full filenames: `mpv-stereo-ipc-stress-20261025-003045-349947.{log,jsonl}`,
+`mpv-stereo-ipc-stress-20261025-003139-350045.{log,jsonl}`, and
+`mpv-stereo-ipc-stress-20261025-003225-350138.{log,jsonl}`.
+
+**Hardware integrity on every opt-out run:** `missed_vblanks=0
+parity_errors=0 wrong_eye=0 wrong_hold=0 commit_errors=0
+fence_errors=0 pair_update_skips=0 full_skips=0 gbm_skips=0`;
+none of these tests has a CRTC/SDR restore failure.
+Native fences and independent KMS flips remain functional
+with either presentation policy disabled. `vo-delayed-frame-count=0`
+on all runs; final mpv internal `avsync` values are
+-9.894ms (no-plan), -9.549ms (no-queue), and +1.668ms
+(both-off). These are not audio-to-photon measurements
+and are influenced by the deliberate seek/pause workload.
+
+**Pacing sensitivity:** with `PLAN_HOLD=0`, some film
+frames advance after only ONE complete physical L/R
+cycle despite the previous movie frame's 2/3-cycle
+`planned_vsyncs`: 59 actual `cycles_1` on the
+no-plan run, and 50 on both-off, versus 0 with the
+gate enabled on the no-queue run. No-plan's
+`signed_error_cycles=-10 abs_error_cycles=338`,
+`mismatched=332` reflect the unlocked timing, not
+lost KMS parity. Both-off had `abs_error_cycles=196`
+and 191 mismatches. Each final plan comparison includes
+startup, 5 pauses and 8 seeks, so the rates describe
+dynamic stress behavior, not a controlled steady-state
+throughput benchmark.
+
+**FIFO admission sensitivity:** no-queue reported
+`pair_unpresented_discards=16`,
+`Stereo DRM drops final: newer_generation=16`,
+and `frame_id_gaps=16` with
+`skipped_frame_ids=16` (only 709 confirmed
+first-L compared with 725 for no-plan). Under
+both-off, 5 accepted but as-yet-unpublished frames
+were superseded by newer generations;
+`frame_id_gaps=6` includes startup plus these
+5. With FIFO enabled in the no-plan run,
+`second_enqueues=6 second_promotions=6
+pair_unpresented_discards=0` (one startup ID gap).
+Differences in 16 vs 5 drops across independently
+timed IPC sessions must not be read as proof
+that removing PLAN_HOLD improves retention:
+queue residency and the race with L deadlines
+also change. The FIFO specifically avoids
+superseding accepted generations when both
+slots have capacity.
+
+**Final summary:** the explicit overrides behave as
+designed, all three remain *physically eye-correct*, and
+the default-on **PLAN_HOLD=1 + TWO_SLOT_QUEUE=1**
+continues to offer the strongest measured combination
+on this machine. No modification to scheduling logic
+is warranted. Verify ordinary DRM 2D output separately;
+it has not yet been tested as part of this default-on
+rollout. Testing across other KMS drivers is outstanding.
