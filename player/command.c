@@ -7607,6 +7607,9 @@ static void cmd_stereo_calibrate(void *p)
     struct command_ctx *ctx = mpctx->command_ctx;
     const char *action = cmd->args[0].v.s;
     int value = cmd->args[1].v.i;
+    // Holding a key must not repeatedly enter/leave the calibration screen.
+    if (cmd->cmd->repeated && strcmp(action, "adjust") != 0)
+        return;
     if (!stereo_calibration_vo(mpctx)) {
         cmd->success = false;
         return;
