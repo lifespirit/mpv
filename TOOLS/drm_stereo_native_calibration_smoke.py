@@ -59,6 +59,8 @@ def main():
     parser.add_argument("--mode", default="2560x1440@120")
     parser.add_argument("--log", type=Path,
                         default=Path("/tmp/mpv-stereo-native-calibration-smoke.log"))
+    parser.add_argument("--phase-scheduler", action="store_true",
+                        help="Exercise predicted MSC/UST timerfd USB dry-run")
     args = parser.parse_args()
     if not args.video.is_file() or not args.mpv.is_file():
         parser.error("video and mpv binary must exist")
@@ -73,11 +75,16 @@ def main():
         env = os.environ.copy()
         for name in ("MPV_DRM_STEREO_PLAN_HOLD", "MPV_DRM_STEREO_TWO_SLOT_QUEUE",
                      "MPV_DRM_STEREO_USB", "MPV_DRM_STEREO_USB_CONTROL",
-                     "MPV_DRM_STEREO_USB_DRY_RUN", "NVSTUSB_EYE_TIMER_US"):
+                     "MPV_DRM_STEREO_USB_DRY_RUN", "NVSTUSB_EYE_TIMER_US",
+                     "MPV_DRM_STEREO_USB_PHASE_SCHED",
+                     "MPV_DRM_STEREO_USB_PHASE_US"):
             env.pop(name, None)
         env.pop("MPV_DRM_STEREO_CALIBRATION", None)
         env["MPV_DRM_STEREO_USB"] = "1"
         env["MPV_DRM_STEREO_USB_DRY_RUN"] = "1"
+        if args.phase_scheduler:
+            env["MPV_DRM_STEREO_USB_PHASE_SCHED"] = "1"
+            env["MPV_DRM_STEREO_USB_PHASE_US"] = "-1500"
         cmd = [
             str(args.mpv.resolve()), "--no-config", "--terminal=no",
             "--input-terminal=no", "--vo=gpu", "--gpu-context=drm",
@@ -125,6 +132,12 @@ def main():
                 if call("get_property", "pause") is not True:
                     raise AssertionError("startup calibration did not pause media")
                 time.sleep(.6)
+                if args.phase_scheduler:
+                    # Real named section + all four directions: change ONLY
+                    # command dispatch time, net result back at -1500 us.
+                    for key in ("RIGHT", "UP", "LEFT", "DOWN"):
+                        call("keypress", key)
+                        time.sleep(.08)
 
                 for pattern in (1, 2, 3, 0):
                     call("stereo-calibrate", "pattern", pattern)
@@ -197,8 +210,23 @@ def main():
         missing = re.search(r"\bmissing_pts=(\d+)", pts_final[-1])
         if not missing or int(missing.group(1)) < 4:
             errors.append("native synthetic L/R pairs were not confirmed on KMS")
-    if len(re.findall(r'Run command: keypress', content)) < 3:
+    if len(re.findall(r'Run command: keypress', content)) < (7 if args.phase_scheduler else 3):
         errors.append("mpv hotkey events not observed in player log")
+    if args.phase_scheduler:
+        phase_finals = re.findall(r"Stereo USB scheduler final:[^\n]*", content)
+        if not phase_finals:
+            errors.append("missing predicted USB scheduler telemetry")
+        else:
+            final = phase_finals[-1]
+            for key, minimum in (("phase_adjustments", 4),
+                                 ("phase_sent", 10),
+                                 ("phase_armed", 10),
+                                 ("reanchors", 10)):
+                m = re.search(rf"\b{key}=(\d+)", final)
+                if not m or int(m.group(1)) < minimum:
+                    errors.append(f"predicted USB {key}: below {minimum}/missing")
+            if not re.search(r"\bphase_us=-1500\b", final):
+                errors.append("phase did not return to original -1500 us")
     for e in errors:
         print("FAIL:", e)
     if not errors:
