@@ -521,9 +521,11 @@ static int preinit(struct vo *vo)
     // KMS scanout; retain the old experiment variables for A/B comparison.
     // Explicitly reject non-DRM contexts instead of silently ignoring 3D.
     bool native_3d = false;
+    int native_calibration = 0;
 #if HAVE_DRM
     struct drm_opts *drm_opts = mp_get_config_group(vo, vo->global, &drm_conf);
     native_3d = drm_opts->stereo_3d;
+    native_calibration = drm_opts->stereo_calibration;
     talloc_free(drm_opts);
     if (native_3d && (!vo->drm || strcmp(p->ctx->fns->name, "drm") != 0)) {
         MP_ERR(vo, "--drm-stereo-3d=yes requires --gpu-context=drm\n");
@@ -538,7 +540,8 @@ static int preinit(struct vo *vo)
         (pair_env && strcmp(pair_env, "1") == 0);
     const char *calib = getenv("MPV_DRM_STEREO_CALIBRATION");
     p->stereo_calibration_pattern =
-        native_3d && calib && strcmp(calib, "1") == 0 ? 0 : -1;
+        native_3d && (native_calibration == 1 ||
+                       (calib && strcmp(calib, "1") == 0)) ? 0 : -1;
     if (p->stereo_pair && !p->stereo_test) {
         MP_ERR(vo, "MPV_DRM_STEREO_PAIR requires MPV_DRM_STEREO_SBS=1\n");
         goto err_out;
