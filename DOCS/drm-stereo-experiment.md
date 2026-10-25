@@ -1,5 +1,34 @@
 # Experimental DRM half-SBS frame-sequential output (no USB)
 
+> **Update (2026-10-25):** the native DRM-stereo video path remains usable
+> without any USB device or extra library. An **optional, disabled-by-default**
+> NVIDIA 3D Vision USB IR bridge has now been added for calibration experiments.
+> See [DRM stereo USB test and optical calibration](drm-stereo-usb.md).
+> This does not establish actual shutter optical phase or glasses safety.
+> Use the software-only dry-run before enabling real USB commands.
+
+> **Current native DRM-stereo defaults (2026-10-25):**
+> With `--drm-stereo-3d=yes`, `MPV_DRM_STEREO_TWO_SLOT_QUEUE`
+> and `MPV_DRM_STEREO_PLAN_HOLD` now **both default to enabled**.
+> The production mode needs **no environment variables** for these
+> policies. Set either one to `0` to disable it for regression testing,
+> or `1` to force it on. Invalid values warn and fall back to defaults.
+> With normal DRM 2D output both switches are ignored. The older
+> `MPV_DRM_STEREO_SBS=1 MPV_DRM_STEREO_PAIR=1` experimental
+> interface continues to default both policies off, and still accepts
+> explicit `=1`. This is a targeted rollout on the tested i915 path;
+> other GPU drivers and normal-mode regressions still need validation.
+> The document below preserves the *historical* opt-in experiments;
+> older sections saying "disabled by default" describe earlier revisions.
+>
+> Rebuild the branch after `474c53b`, then verify the init log contains
+> `Stereo scheduling policy: plan_hold=1 two_slot_queue=1 (native_3d=1`
+> when neither environment switch is set. For independent opt-out use
+> `MPV_DRM_STEREO_PLAN_HOLD=0` or
+> `MPV_DRM_STEREO_TWO_SLOT_QUEUE=0`. The injected
+> `MPV_DRM_STEREO_QUEUE_TEST_HOLD_MS` remains **test-only and off**.
+
+
 This is the first implementation checkpoint on branch
 `feature/drm-stereo-diagnostics`. It is an **opt-in visual/DRM timing
 experiment**: it does not load `libnvstusb`, does not address the
@@ -4071,3 +4100,1544 @@ the same pacing eye and GPU-fence settings. Compare physical
 aggregate final statistics. Do not mistake a dropped *diagnostic event*
 for a dropped display refresh. This source patch requires a local build
 and hardware validation.
+
+
+
+### Experimental confirmed-MSC planned-hold gate (source-only)
+
+Branch: `feature/drm-stereo-msc-presentation`, based on
+`feature/drm-stereo-async-logging`.
+
+`MPV_DRM_STEREO_PLAN_HOLD=1` enables a strictly opt-in lower-bound
+hold gate. The current movie generation's ORIGINAL `num_vsyncs` describes
+the number of complete L/R display cycles before the next image may
+begin. The actual first confirmed LEFT MSC is recorded by the KMS worker
+AFTER successful page-flip event dispatch, never from an atomic-submit
+guess. The next generation can be promoted on L only when
+`target_msc >= first_left_msc + 2 * clamp(planned_vsyncs, 1, 4)`.
+Existing native-fence checks and GBM ownership rules still apply.
+The default remains OFF for a scientifically comparable baseline.
+
+CAUTION: A lower-bound gate is not an A/V-synchronized scheduler by itself:
+late frames may extend display duration. The initial 120s experiment must
+report `Stereo plan hold final` counters, movie frame-ID gaps, and
+`Stereo PTS final` relative drift. If drift grows, disable the gate and
+build media-clock deadline skipping before enabling it as a default.
+CPU measurements of renderer / EGL swap / fence-export calls describe CPU
+command-submission work, not actual GPU completion.
+
+
+
+### Sampled GPU fence completion diagnostics
+
+With `--drm-stereo-stats=yes`, one of every 16 newly rendered pairs
+produces a `Stereo GPU probe:` diagnostic. While the completed pair is
+still safely owned by the producer, the logger duplicates both native
+sync_file FDs; the ordinary-priority logger, NOT the SCHED_FIFO KMS
+thread, polls them (max 100ms), optionally obtains dma_fence timestamp_ns
+via SYNC_IOC_FILE_INFO (Linux), then closes its duplicate FDs.
+The probe reports CPU draw, EGL swap and fence export durations separately
+for L/R and both *observed* and (if supported) kernel-recorded fence
+completion age relative to pair publication. Note `mp_time_ns` is based
+on raw monotonic time with a process offset; kernel timestamp_ns is
+converted to that timebase. Negative kernel age means a fence was already
+signaled before both eyes were published. -1 indicates unavailable.
+The observed poll time is a completion **upper bound**, not a precise GPU
+completion time.
+
+The worker's normal-priority logging can be arbitrarily delayed without
+holding the KMS scanout mutex or GBM buffers. Duplicate sync_file FDs
+are always closed on completion, failure or timeout. Default quiet mode
+records no probes. The existing async logger counts lost diagnostic
+events separately from video frames and page flips.
+
+
+
+### Optional early producer wake and pending preservation controls
+
+The baseline `--drm-stereo-pacing-eye` continues to determine mpv's
+logical presentation feedback. Experimental variable
+`MPV_DRM_STEREO_RENDER_WAKE_EYE=left|right` independently chooses
+which physical flip wakes the producer's `flip_page` wait. With
+`--drm-stereo-pacing-eye=right`, setting render wake to `left`
+offers the VO ~8.33ms additional lead time. This is **not** guaranteed
+to help: renderer may see the previous feedback cycle. Evaluate with
+matched tests and disable if audio/video drift or cadence worsens.
+Default render wake matches the configured pacing eye.
+
+`MPV_DRM_STEREO_KEEP_READY_PENDING=1` is a second, independent
+experiment that retains the previously published pending generation if
+both native GPU fences are signaled when a new generation arrives.
+It discards the newer incoming generation rather than the older ready
+one. This preserves display order and L/R safety, but does NOT guarantee
+fewer missing source frames or lower A/V latency. The shutdown
+`Stereo staging final` line distinguishes protected older pairs from
+discarded newer frames. Default is 0 (prior newest-pair-wins logic).
+Only one staging slot remains, and no GPU/KMS BO is freed while scanout
+owns it.
+
+Do not enable both experiments simultaneously for first A/B; isolate
+render wake phase and candidate retention effects. Neither changes
+physical KMS 120Hz or stereo eye parity.
+
+
+
+### Correction of kernel GPU probe clock (after four 120-second runs)
+
+The original GPU probe kernel values were systematically wrong:
+`fence_kernel_L_age_ms` was around +1215ms and
+`fence_kernel_R_age_ms` around +1223ms; the matching
+`fence_observed_*` measurements were ~8ms/~16ms.
+This discrepancy was caused by converting Linux dma_fence
+CLOCK_MONOTONIC timestamps with mpv's raw-time startup
+offset, despite mpv selecting CLOCK_MONOTONIC_RAW on Linux.
+
+The corrected converter takes paired CLOCK_MONOTONIC and
+`mp_time_ns()` samples, maps each reported kernel fence timestamp
+to mpv's CPU timebase and **then** subtracts the pair-published
+timestamp. The R-minus-L fence completion delta in the old
+logs was unaffected by this constant clock-epoch mismatch,
+but absolute kernel ages MUST be remeasured with the fixed code.
+This fix changes diagnostics only.
+
+
+### Four-way 120-second MSC presentation A/B (Oct 24 2026)
+
+Source: matched user test logs `mpv-stereo-{baseline,hold,wake,keep}.log`,
+all exact build `v0.41.0-dev-gdb237dc84` (before the kernel probe
+timebase correction), native `--drm-stereo-3d=yes`,
+`--drm-stereo-pacing-eye=right`, `--drm-stereo-stats=yes`,
+`--video-sync=display-resample`, DP1 2560x1440@120, VRR off,
+`--start=295 --length=120`. All ended normally. i915 card1,
+SCHED_FIFO priority 10 confirmed.
+
+| Metric | baseline | PLAN_HOLD=1 | RENDER_WAKE_EYE=left | KEEP_READY_PENDING=1 |
+|---|---:|---:|---:|---:|
+| physical flips | 14403 | 14405 | 14398 | 14399 |
+| missed_vblanks / wrong_eye / commit_errors | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 |
+| pair_renders | 2877 | 2877 | 2877 | 2876 |
+| confirmed first L | 2862 | 2846 | 2834 | 2866 |
+| frame_id_gaps | 15 | 31 | 43 | **11** |
+| unpresented pending discards | 15 | 31 | 43 | **0** |
+| newly rendered incoming pairs discarded by keep | 0 | 0 | 0 | 10 |
+| fence_deferrals | 1466 | 68 | 2953 | 310 |
+| actual hold: 1 / 2 / 3 / >=4 cycles | 294 / 1146 / 1087 / 334 | **0 / 1394 / 1412 / 39** | **0 / 1389 / 1400 / 44** | 89 / 1348 / 1315 / 113 |
+| requested-vs-actual exact / compared | 1517 / 2846 | **2794 / 2814** | 2734 / 2790 | 2416 / 2853 |
+| exact rate (comparable adjacent pairs only) | 53.3% | **99.3%** | 98.0% | 84.7% |
+| PTS relative drift last (ms) | +33.633 | +50.298 | -16.366 | -16.365 |
+
+`hold` almost eliminates incorrect hold lengths, but costs 31 source
+frames (vs 15 baseline). Its small `fence_deferrals=68` partly
+reflects deferring the *fence check itself* until the due MSC, not
+faster GPU completion: `early_blocks=2830`, `late_promotions=48`.
+`wake` also markedly regularizes 2/3-cycle cadence without a hold
+gate, but has the worst frame loss (43) and highest deferrals (2953).
+`keep` reduces source frame gaps to 11, but it explicitly throws away
+10 NEW incoming frames to preserve ready older pending pairs;
+zero `unpresented_discards` is **not** equivalent to zero frame loss.
+Its 84.7% exact rate is intermediate. `keep` also shows lower sampled
+CPU render times than the other sequential runs, indicating possible
+CPU/GPU frequency or scheduling confounding: repeat A/B before
+attributing the whole improvement to the policy.
+
+For each run, 179 asynchronous GPU probe events (every 16th pair)
+were recorded; none reported async queue loss. Typical per-pair
+CPU draw L/R means (ms): baseline 0.495/0.215; hold 0.524/0.217;
+wake 0.519/0.210; keep 0.286/0.102. Observed fence completion after
+pair publication averaged L about 8.0ms, R about 15.7ms. The reliable
+WITHIN-PAIR kernel timestamp difference R minus L has median about
+7.7ms in all modes; R is later despite quicker CPU draw and EGL swap.
+The original absolute `fence_kernel_{L,R}_age_ms` fields (~+1.2s)
+are INVALID because MONOTONIC kernel timestamps were compared directly
+to mpv's MONOTONIC_RAW-derived offset. Corrected in next commit
+`fd64ba3a`, but must be remeasured. A close-to-one-refresh R-minus-L
+delay suggests investigating GPU command completion cadence / EGL
+synchronization; the existing code already calls
+`eglSwapInterval(display, 0)` in stereo mode.
+
+All four normal shutdowns still yield a post-playback DRM atomic
+EINVAL; no in-play KMS commit errors. Relative PTS drift is anchored
+to each run's first first-L, **not** an absolute audio-to-photon delay.
+The exact-rate matrix excludes intervals containing missing source IDs:
+improved exactness can come with WORSE frame retention, as here.
+
+Suggested next path: fix and repeat native-fence timestamp diagnostics,
+investigate the ~7.7ms L-to-R GPU completion lag and the eligible
+left-boundary phase, and design a bounded **media-clock deadline**
+policy with an explicit late-drop decision. Do not enable PLAN_HOLD as
+a default without managing A/V delay, or grow a FIFO without accounting
+for per-eye GBM BO scarcity. Run more than one A/B trial to control
+thermal/frequency variance. Prefer to retain the independent KMS
+worker, which has achieved 0 physical misses across all four modes.
+
+
+### Experiment: per-surface EGL swap interval (after fixed-clock 120s baseline)
+
+The corrected native dma_fence clock test
+(`mpv-stereo-clockfix.log`, build `v0.41.0-dev-gf2d859ffd`)
+contained 179 samples. Mean kernel completion ages relative to producer
+pair publication: L=7.939ms and R=15.739ms; medians L=7.455ms and
+R=15.183ms. R-minus-L GPU completion delta mean 7.800ms,
+median 7.739ms, max 13.932ms. The ordinary-priority poll-thread
+detection lag over kernel signal time averaged 0.078ms (L) and
+0.091ms (R): these are genuine driver-recorded fence completion
+differences, not delayed userspace detection. Both CPU render and
+eglSwapBuffers for R are faster than L.
+
+In this baseline: 14,399 flips, zero physical misses, zero eye errors,
+zero in-play commit failures, 22 first-L frame_id gaps and 22 pending
+discards. 1,528 / 2,832 comparable planned-vs-actual hold intervals
+matched (54.0%). 1,335 native fence deferrals, zero fence errors.
+The usual post-shutdown DRM atomic EINVAL remains, separate from
+in-play errors.
+
+An initialization oversight is visible in the source:
+`eglSwapInterval(display, 0)` is only called with LEFT draw surface
+current. EGL 1.5 defines swap interval **per current draw surface**;
+the default for each new EGLSurface is 1, and the second RIGHT surface
+was created after the first one. An R completion ~one vblank later is
+compatible with implicit right-surface EGL swap throttling, but could
+also be driver-specific GPU queueing. No causal claim is made yet.
+
+`MPV_DRM_STEREO_RIGHT_SWAP_INTERVAL_ZERO=1` now requests interval=0
+on the RIGHT EGLSurface as soon as it becomes current for the first
+R draw. The existing LEFT setting remains unchanged, and the KMS
+worker and presentation pipeline are untouched. The producer logs
+whether EGL accepted the call and the EGLConfig advertised minimum
+and maximum swap interval. An EGL driver may silently clamp the
+requested interval. Default is OFF to retain direct A/B.
+
+Run baseline with this variable unset and an otherwise identical run
+with only this variable set, ideally using the same 120-second movie
+window. Compare `Stereo GPU probe` kernel L/R completion ages and
+R-L delta, L-boundary `fence_deferrals`, `frame_id_gaps`, MSC holds,
+and ensure `missed_vblanks`/parity/commit errors remain zero.
+Do not simultaneously enable `PLAN_HOLD`, `RENDER_WAKE_EYE`, or
+`KEEP_READY_PENDING`: their effects must remain independently
+identifiable.
+
+
+
+### Right swap-interval experiment result and event-focused GPU probes
+
+Test: `mpv-stereo-right-swap0.log` (Oct 24, 2026),
+build `v0.41.0-dev-g06b04c3cb`, 120s, only
+`MPV_DRM_STEREO_RIGHT_SWAP_INTERVAL_ZERO=1`.
+
+The EGL call returned success but EGLConfig reported
+`EGL_MIN_SWAP_INTERVAL=1` and `EGL_MAX_SWAP_INTERVAL=1`.
+By the EGL API contract, 0 is silently clamped to the allowed range;
+the new call could not actually set interval 0. More importantly,
+Mesa's DRM/GBM swap implementation
+(`src/egl/drivers/dri2/platform_drm.c`, `dri2_drm_swap_buffers`)
+does not queue a vblank wait for the surface; an EGLConfig minimum of
+1 does **not** establish that vblank throttling caused the observed
+GPU delta.
+
+Mean native kernel fence signal age in clockfix baseline vs swap0:
+L=7.939 vs 7.865ms, R=15.739 vs 15.523ms,
+R-L=7.800 vs 7.658ms; identical R median 15.183ms.
+Physical KMS misses/parity/commit errors remained zero. Movie
+`frame_id_gaps` 22 vs 18, `fence_deferrals` 1335 vs 1491,
+exact planned holds 1528/2832 vs 1511/2839. This is not evidence of
+a GPU-latency improvement from the swap-interval change.
+Recast the swap-interval knob as diagnostic only; when min>0 it now
+prints an explicit clamping warning.
+
+To pinpoint the real cause of candidate loss, each logged
+`Stereo unpresented pair discarded` with native fences now ALSO
+enqueues a nonblocking `Stereo GPU probe` (`kind=discard`) for
+the exact pending generation being discarded. The async logger uses
+duplicate sync_file FDs to retrieve historical signal timestamps,
+including fences signaled long before the producer dropped the pair.
+`last_failed_L_age_ms` captures that pair's KMS age at its last
+unsuccessful L-boundary check; `gpu_R_after_failed_L_ms` computes the
+right fence signal's offset from that *CPU check* in the same mpv
+timebase. Positive means the right GPU fence signaled too late for
+the last left decision; negative means it was already signaled, in
+which case the other eye, an error, or a race must be examined.
+This is an observable signal-vs-check comparison, NOT proof of a
+possible earlier scanout: committing FB_ID also requires a future
+L boundary and correct BO ownership.
+
+The diagnostic stays OFF with `--drm-stereo-stats=no`.
+No GPU waits, ioctls or allocations were added to SCHED_FIFO KMS.
+The existing bounded asynchronous logger may drop diagnostic events
+under load, so always check its loss count and avoid interpreting
+missing events as missing movie frames.
+
+
+### Lost-pair probe outcome: late R signal versus next producer overwrite
+
+Baseline test `mpv-stereo-right-swap0(1).log`, despite the reused
+filename, **did not enable** the right swap interval experiment: build
+`v0.41.0-dev-gf102d6c65`, no `Stereo right EGLSurface` enable log;
+`PLAN_HOLD`, `RENDER_WAKE_EYE` and `KEEP_READY_PENDING` disabled.
+The test command did not explicitly unset
+`MPV_DRM_STEREO_RIGHT_SWAP_INTERVAL_ZERO`, so future reproducible
+baseline commands should unset it too.
+
+Summary: 14,403 confirmed physical flips, 0 missed physical vblanks,
+0 wrong eye/hold/parity, 0 in-play commit errors. 2,877 pair renders,
+2,857 confirmed first L generations, 20 unpresented pending discards,
+20 `frame_id_gaps`. 1,452 native fence deferrals, 0 fence errors.
+Planned-vs-actual exact 1,476 / 2,836 comparable intervals (52.0%).
+There were 179 periodic `kind=sample` GPU probes and, importantly,
+exactly 20 `kind=discard` probes for all 20 lost generations.
+
+Every one of these 20 losses shows:
+- Two failed L-boundary fence checks, with most recent L check at pair
+  age 28.332–32.725ms (median 31.747ms).
+- The LEFT kernel fence had *already* signaled before that last L
+  check (mean L signal age 20.228ms vs 31.650ms for the check).
+- The RIGHT kernel fence signaled **AFTER** the last L check,
+  by min 0.314ms / median 1.466ms / mean 1.770ms / max 5.226ms.
+  R signal age relative to pair publication averaged 33.420ms.
+- By the time the next producer publication discarded the old pending
+  generation, the RIGHT fence had already signaled. The R-signal to
+  discard lead was 0.062–1.290ms, median 0.164ms (mean 0.433ms).
+  Every one of the 20 producer-side `fence_L` and `fence_R`
+  snapshot values was 1 (both signaled).
+- The producer replaced the pending pair 1.034–5.352ms after the
+  last failed L check, median 1.785ms. The next permissible L boundary
+  would occur approximately 16.667ms after the failed check (120Hz
+  physical L/R) because the next physical refresh is R, not L.
+
+This is **not** KMS or GL throughput failure. It is a deterministic
+*late-to-L / ready-before-next-frame / overwritten-before-next-L*
+queue policy failure. It cannot be fixed by promoting at the immediate
+R refresh without mixing two source generations between eyes. Waiting
+for R on the SCHED_FIFO KMS thread would also break the hard physical
+refresh pacing. Since producer publication precedes the next eligible
+L edge, preservation of the old ready pending generation requires
+retaining that generation across new frame arrival.
+
+A one-slot KEEP_READY_PENDING trial protected old ready pending frames
+and reduced displayed source `frame_id_gaps` from 15 to 11 in an
+earlier run, but explicitly discarded 10 newly arriving generations:
+it exchanges which frame is lost, rather than delivering both. The
+next design should define media-PTS anchored deadlines, bounded
+generation queueing and GBM BO ownership/backpressure before aiming
+to eliminate source-frame losses. With two pending generations plus
+one currently scanned-out pair, typical GBM surface triple buffering
+already consumes all three BOs per eye; a producer cannot blindly
+render a fourth generation. Require bounded buffering, explicit
+late-frame selection and measured impact on audio/video latency,
+rather than silently introducing unbounded presentation delay.
+
+
+### Experimental two-slot FIFO for late RIGHT-fence pairs
+
+After the 20 loss samples in the `f102d6c65` test, the opt-in
+`MPV_DRM_STEREO_TWO_SLOT_QUEUE=1` prevents a newer producer frame
+from automatically replacing an older complete unpublished pair.
+
+States: `active` (KMS scanout), `pending` (oldest unpublished),
+`queued` (one additional unpublished pair). A completed new pair
+enters pending if empty, otherwise queued if empty. On successful
+LEFT atomic commit only, KMS selects pending as the next active
+generation and advances queued to pending. The previous active BOs
+remain held until the flip callback confirms the transition and the
+VO producer drains retired buffers. No eye-specific promotion or
+pair mixing is introduced.
+
+Bounded admission: `vo_drm_stereo_pair_can_capture` returns false
+when both pending slots are full, OR when either GBM eye surface
+has no free buffers. Under this mode it **never evicts** pending to
+make room; the upstream producer skips the new draw without waiting
+for a 120Hz event or blocking the real-time KMS thread. All accepted
+pairs retain their original sync_file fences and source PTS metadata.
+Cleanup also releases the new queued BOs/FDs.
+
+`Stereo two-slot queue final` adds `second_enqueues`,
+`second_promotions`, `full_skips`, `gbm_skips`,
+`unexpected_incoming`, `remaining_pending` and
+`remaining_queued` counters. Cross-compare these with
+`frame_id_gaps`, `pair_update_skips`, the PTS drift, planned/actual
+hold matrix, and missed_vblanks / wrong_eye / KMS commit_errors.
+`full_skips` and `gbm_skips` can count repeated attempts to draw
+the same movie picture; they are NOT directly unique source-frame
+drop counts.
+
+This is the first bounded queue experiment, OFF by default.
+It intentionally separates pair-retention correctness from a later
+media-clock-anchored deadline scheduler. The FIFO could retain
+frames longer than is useful for A/V sync. Do not enable it together
+with `PLAN_HOLD`, `RENDER_WAKE_EYE` or
+`KEEP_READY_PENDING` during the initial A/B. In the unlikely event
+of enabling both KEEP_READY_PENDING and TWO_SLOT_QUEUE, two-slot FIFO
+takes precedence.
+
+Test with the previous clockfix 120s baseline (same mpv options,
+source offset and DP 120Hz mode), while unsetting all other
+experimental variables; on the new run set ONLY
+`MPV_DRM_STEREO_TWO_SLOT_QUEUE=1`.
+
+Safety: this code has been reviewed by inspection, not compiled on
+the target i915 Arch system; treat it as experimental. Stop and
+report if there are compile errors, GBM front-buffer failures,
+KMS commit errors, visible A/V latency or playback freeze.
+
+
+ 
+### First two-slot FIFO A/B: zero missing source frames in 120 seconds
+ 
+Test log: `mpv-stereo-queue2.log`; build `v0.41.0-dev-gc51dfaddc`.
+Settings: DP-1 2560x1440@120, 23.976fps Half-SBS, movie offset
+295s, duration 120s, right-eye VO pacing, display-resample, 3-deep
+mpv swapchain, stereo stats ON. Only
+`MPV_DRM_STEREO_TWO_SLOT_QUEUE=1` enabled among queue/pacing experiments.
+ 
+Result: 14,405 physical flips and zero missed_vblanks, parity_errors,
+wrong_eye, wrong_hold or in-play atomic commit errors. The full
+2,877/2,877 producer pairs were confirmed at first L, with
+`frame_id_gaps=0` and `pair_unpresented_discards=0`.
+The second slot received 17 pairs and all 17 were eventually promoted:
+`second_enqueues=17 second_promotions=17`.
+`full_skips=0 gbm_skips=0 unexpected_incoming=0
+pair_update_skips=0`; queue empty at shutdown. `fence_deferrals=1553`
+versus 1452 in the prior f102d6c single-pending baseline.
+ 
+Same 120s single-pending baseline (`mpv-stereo-right-swap0(1).log`,
+`f102d6c`) produced all 2,877 pairs but confirmed only 2,857
+first-L source frames: 20 pending discards and 20 `frame_id_gaps`.
+Physical KMS remained error-free in both cases. This strongly
+supports overwriting the single pending pair as the cause of those
+20 *particular* playback losses; it does not prove no losses under
+other loads or scenes.
+ 
+Native GPU fence signal ages are little changed: 179 periodic samples
+per run, mean L=7.919ms, R=15.617ms, R-L=7.697ms for two-slot,
+versus clockfix baseline L=7.939ms, R=15.739ms, R-L=7.800ms.
+The FIFO changes the retention policy rather than rendering speed.
+ 
+Pacing is **not fixed**: exact previous `num_vsyncs` hold interval
+matches 1484/2875 = 51.62%. First-L inter-generation intervals:
+1 cycle=328, 2=1096, 3=1138, 4+=314. Movie PTS span=119.953s,
+KMS scanout span=119.986621s; anchor-relative end drift=+33.621ms,
+average=+104.744ms, max=+185.835ms. This *anchor-relative* drift
+does NOT measure absolute audio-to-photon latency. Existing PLAN_HOLD
+alone achieved 99.3% hold agreement in an older 120s test, but it
+discarded 31 movie frames with the single pending slot.
+ 
+Next controlled A/B should enable both
+`MPV_DRM_STEREO_TWO_SLOT_QUEUE=1` and
+`MPV_DRM_STEREO_PLAN_HOLD=1`, leaving KEEP_READY_PENDING,
+RENDER_WAKE_EYE and RIGHT_SWAP_INTERVAL_ZERO unset. This is the
+first time intentionally combining two knobs after the isolated
+baseline. Acceptance: no physical KMS errors, no high volume of
+full/GBM update skips, no source ID gaps, >98% exact planned hold
+intervals, no long-term accumulation of relative PTS drift. An
+apparent success must still be validated by perceptual A/V timing
+and longer-run tests. Media-clock deadlines remain a separate
+future step, not implicitly solved by PLAN_HOLD.
+
+
+### Two-slot FIFO + planned MSC hold: 120-second successful A/B
+
+Test: `mpv-stereo-queue2-hold.log`, same binary
+`v0.41.0-dev-gc51dfaddc` as isolated QUEUE2, with
+`MPV_DRM_STEREO_TWO_SLOT_QUEUE=1` AND
+`MPV_DRM_STEREO_PLAN_HOLD=1`. Other opt-in stereo controls
+unset. Display DP-1 2560x1440@120 Hz, source 23.976 fps
+half-SBS, start=295 length=120, display-resample,
+right-eye VO pacing and native GPU sync_file fences.
+
+**Integrity:** 14,401 physical flips, zero missed_vblanks,
+parity_errors, wrong_eye, wrong_hold or in-play commit errors.
+2,877 source stereo pairs rendered and 2,877 first-L and 2,877
+first-R generations confirmed. `frame_id_gaps=0`,
+`pair_unpresented_discards=0`, `pair_update_skips=0`;
+0 GBM pressure and 0 dropped incoming sources.
+
+**Pacing:** `Stereo plan final` adjacent_compared=2875,
+exact=2872, mismatched=3, or **99.8957%** correct holds.
+No skipped intervals or source IDs in this matrix.
+Confirmed L durations: 1 cycle=1, 2 cycles=1436,
+3 cycles=1435, 4+ cycles=4 (the exceptional holds are
+concentrated around playback startup). The requested vs
+actual histogram has 1436 exact 2-cycle holds, 1434 exact
+3-cycle holds, one 2->3 and one 3->4+ (the remaining
+mismatch is an exact count inside the 4+ bucket).
+KMS plan hold: early_blocks=4280, due_promotions=2876,
+late_promotions=4, anchor_missing=0. Native-fence checks=2883,
+promotions=2876, deferrals=6, errors=0 (compared with 1,553
+deferrals on QUEUE2 alone).
+
+**Queue behavior:** second_enqueues=1410,
+second_promotions=1410, full_skips=0, gbm_skips=0,
+unexpected_incoming=0; pending and queued empty at shutdown.
+This is real prebuffering under the 2/3-cycle gate,
+not dropped producer draws. No progressive GBM backpressure
+appeared during the 120-second sample.
+
+**GPU work:** 179 periodic `kind=sample` probes;
+kernel fence age L mean=7.770ms and R mean=15.430ms
+after pair publication, R-L mean=7.659ms. The new
+policy does not remove sequential GPU completion latency,
+but it is no longer a visible source-generation loss.
+
+**Timing interpretation:** raw media-PTS vs physical scanout
+comparison has scanout span=119.986626s, movie PTS span=
+119.953000s; anchored last delta=+33.626ms, average=+95.381ms,
+max=+156.404ms. The 31-sample trace is ~154ms at 5 seconds
+after startup and ~47ms at ~115 seconds; the falling
+delta is largely the 23.976 fps media timeline compared
+against an almost exact 24.000 fps display-resample
+2/3-cycle cadence. Core logs explicitly confirm
+`Video sync mode enabled` and
+`swresample: 48056Hz ... -> 48000Hz`. Audio is
+being rate-corrected by mpv; **do not interpret this
+raw-PTS difference as measured A/V latency**, and do
+not feed uncorrected source media PTS into a new
+wallclock/MSC deadline gate. Absolute audio-to-photon
+delay was not observed in these logs.
+
+**Next:** before any media-PTS-aware gating, instrument or
+reuse the mpv core's *effective video/audio speed* and
+presentation clock anchor so a scheduler can compare
+corrected presentation deadlines with actual DRM UST,
+without fighting `--video-sync=display-resample`.
+Maintain current QUEUE2+HOLD as a validated opt-in
+reference. Perform a longer video run and pause/seek
+stress with audio to check non-steady-state behavior
+and perceived synchronization. Treat EOF-only atomic
+EINVAL on CRTC restoration separately from in-play
+`commit_errors=0`.
+
+
+### 15-minute continuous hold + two-slot stability run (2026-10-24)
+
+Input: `mpv-stereo-queue2-hold15.log`,
+`v0.41.0-dev-gc51dfaddc`, native Intel i915/Mesa 26.2.5,
+DP-1 2560x1440@120, 23.976 Half-SBS H.264, from media PTS 0
+(`--length=900`, no `--start`), with
+`--video-sync=display-resample`, right-eye VO pacing and
+`MPV_DRM_STEREO_TWO_SLOT_QUEUE=1` +
+`MPV_DRM_STEREO_PLAN_HOLD=1`.
+This was continuous playback; no pause or seek was exercised.
+
+**Preservation and physical correctness:** 21,578 render pairs and
+21,578 confirmed FIRST-L source generations, 21,577 FIRST-R
+generations at test cutoff (one last L without an R before stop),
+`frame_id_gaps=0`, `pair_unpresented_discards=0`,
+`pair_update_skips=0`, `missed_vblanks=0`, `parity_errors=0`,
+`wrong_eye=0`, `wrong_hold=0`, `commit_errors=0`.
+107,907 physical flips, all `max_gap=1` in the 899 1-second
+physical scanout reports. The single final `Failed to commit
+atomic request: Error number 22` is after the end-of-run
+stats at 899.624s, during shutdown restoration; it is not
+an in-play KMS flip error.
+
+**Queue and scheduling:** all 10,781 second-slot enqueues became
+second-slot promotions; `full_skips=0 gbm_skips=0
+unexpected_incoming=0 remaining_pending=0 remaining_queued=0`.
+Only SIX GPU fence deferrals over ~21.6k generations.
+`PLAN_HOLD`: `early_blocks=32354 due_promotions=21577
+late_promotions=4`.
+Exact previous requested hold vs actual physical L-cycle interval
+was 21,572/21,576 = **99.98146%**; 4 mismatches,
+`abs_error_cycles=5`, `signed_error_cycles=1`;
+no skipped IDs or invalid MSC. Actual duration histogram
+for adjacent first-L generation changes:
+`cycles_1=0, cycles_2=10787, cycles_3=10785, cycles_4plus=5`.
+The source rate of 23.976 frames/sec is locked to
+alternating 2/3 stereo cycles at a physical 120Hz display
+(~24 frames/sec after display-resample).
+
+**GPU signal latency stable:** 1,348 `kind=sample` GPU probes
+(once per 16 pairs), no lost-pair probe events.
+Mean L kernel fence age=8.057ms, R=15.857ms,
+R-L=7.800ms; the medians are 7.572ms, 15.244ms,
+and 7.734ms, respectively. Splitting into three 5-minute
+blocks gives R-L mean 7.881 / 7.709 / 7.811 ms, indicating
+no progressive GPU latency issue.
+
+**Important diagnostic clock-domain and resampling insight:**
+`Stereo PTS final` reports scanout_span=899.241387s,
+movie_pts_span=899.941000s, last raw drift=-699.613ms,
+min drift=-707.951ms and max=+174.693ms.
+This compares *unadjusted media PTS* against physical UST.
+It is NOT absolute A/V sync or an accumulating rendering lag.
+After initial ~5sec startup transient, sparse PTS/UST samples
+follow the precise fitted line
+`raw_relative_drift_ms = 175.466 - 0.972512 * elapsed_ust_s`;
+maximum absolute residual on these regular snapshots after 10sec
+is only **0.024ms**. Independently, the hardware MSC-to-UST
+measurements give actual refresh **119.996702Hz**; five refreshes
+per frame yield 23.999340 delivered pictures/s.
+Compared with source `24000/1001` frames/s, the expected
+raw drift slope is about **-0.972ms/s**, matching the trace
+slope almost exactly. mpv logged `Video sync mode enabled`
+and `swresample 48056Hz -> 48000Hz`, confirming that
+audio time stretching/resampling is active. DO NOT
+interpret -700ms raw drift as -700ms A/V desync, nor
+apply a naive source-media-PTS correction in KMS.
+Actual audio-to-photon offset is not observable in these
+records; measuring it would require an audio clock anchor,
+timestamped samples or independent perceptual/physical test.
+
+Consequence: QUEUE2 + PLAN_HOLD passed 15-minute continuous
+stress without missing source frames, incorrect eye order,
+physical vblank loss or GBM pressure, at 99.98% duration
+agreement. Preserve this as the reference implementation
+and do not replace mpv's existing display-resample clock
+with raw media PTS. Next independent validation should
+exercise pause/resume, seeks, speed changes, file ending,
+and real audio/video synchronization before enabling the
+two options by default. No evidence here warrants a
+new PTS/MSC correction feedback loop.
+
+
+### IPC pause/resume and seek stress: pass, with diagnostic caveats
+
+Test artifacts: `mpv-stereo-ipc-stress-20261024-224807-330991.log`
+and `.jsonl`, using `v0.41.0-dev-gc51dfaddc` built from the
+two-slot + PLAN_HOLD experiment. Duration ~140.07 s wall clock,
+starting media offset 295s. JSON IPC script ran 18 requested
+actions: 5 pause/resume pairs and 8 exact seeks (relative/absolute,
+including an exact seek *while paused*). Every action succeeded;
+all 8 application seeks emitted `seek` and `playback-restart`;
+application exited with `code=0`.
+
+Pause correctness: media `time-pos` stayed exactly 306.681s
+over the 6s pause, and after a paused seek to 348.723s the
+`pause` property remained true until explicit resume.
+Continuous 120Hz physical L/R scanning did not pause or lose
+a vblank (KMS continues to repeat the active pair).
+Relative seek from 388.722s to 348.723s while paused was
+correct; later startup/resume audio-video
+`avsync` snapshots can temporarily be ~-0.03 to -0.05s,
+but final sample `avsync=-0.000123s` (= -0.123ms)
+and `vo-delayed-frame-count=0`.
+
+Final KMS: `flips=16747 missed_vblanks=0 parity_errors=0
+wrong_eye=0 wrong_hold=0 commit_errors=0`; 2887 pairs
+rendered and 2887 confirmed new left and right generations.
+`pair_unpresented_discards=0 pair_update_skips=0`.
+FIFO `second_enqueues=1127 second_promotions=1127
+full_skips=0 gbm_skips=0 unexpected_incoming=0` and
+both queue slots were empty at exit; 26 native-fence
+deferrals and 0 native-fence errors. After exit, the
+known DRM atomic EINVAL during CRTC restoration is not
+a running flip error.
+
+**Important: final summary is not a steady-state cadence test.**
+`Stereo PTS final` has 9 segments and 8 media PTS
+discontinuities, matching the 8 commanded playback seeks.
+`frame_id_gaps=1` and `skipped_frame_ids=1` come from
+frame_id 37 -> 39 during initial startup (the first
+new-generation trace), NOT a mid-test pending queue discard.
+The source frame 38 was never an accepted published pair;
+cause of this upstream startup omission is not uniquely
+established by the existing telemetry. No loss in either
+pending slot during seek operations.
+
+`Stereo plan final`: 2850/2876 = **99.096%** exact
+previous-plan intervals with 26 mismatches,
+`signed_error_cycles=900 abs_error_cycles=910`. Comparing
+these global counters to the 99.981% steady-state test is
+invalid: KMS must keep flipping even while mpv is paused.
+Fifteen seconds of explicit paused time fall within
+otherwise continuous movie PTS segments
+(6s first pause + 3s before paused seek + 3 * 2s burst
+pauses); at 60 stereo cycles/s this accounts for ~900
+surplus physical cycles. Startup/seek intervals also
+contaminate the remaining hold comparisons.
+
+`relative_drift_last_ms=6046.769` is similarly not
+audio/video delay: the current PTS vs hardware UST statistic
+does not reset its time anchor across pause/resume.
+Three final 2-second pauses alone contribute about 6s
+to its final segment, and the IPC `avsync` settled to
+~0 by the end. Do not feed this unsegmented pause-included
+drift into a new KMS PTS controller.
+
+Conclusions: 2-slot retention, paired-eye scanout and
+planned-hold gating survive every tested pause/seek/resume
+transition without a KMS error, pending discard or GBM
+pressure. The existing diagnostic counters for PTS drift
+and aggregate cadence need *pause-aware segmenting* if
+one wants trustworthy global summary percentages under
+interactive playback. That observability fix should not
+alter KMS timing or promote from old queued generations.
+A further functional test could seek repeatedly *while
+the 2-slot queue is intentionally occupied* (rather than
+relying on incidental timing), and cover playback speed
+and end-of-file state changes.
+
+
+### Pause-aware PTS diagnostics and forced occupied-queue seek
+
+Starting at commit `c07b262`, the confirmed-FIRST-LEFT diagnostic
+starts a fresh PTS/MSC segment whenever the interval since the
+previous confirmed FIRST-LEFT presentation exceeds **500ms**, even if
+the source PTS is monotonic and frame IDs are adjacent. This
+distinguishes *wall-clock time with no new movie frame* (pause,
+possible stall or other idle) from genuine source-frame hold.
+A qualifying gap does not increment the 2/3-cycle histogram or
+the planned-hold comparison matrix and does not add to the current
+segment's raw PTS-relative drift. `Stereo PTS final` now reports
+`long_gap_resets` and `long_gap_ust_s`, alongside the old total
+`segments` and `discontinuities`. The threshold is deliberately
+conservative; the event is called a long idle gap, not proof of
+an explicit user pause. Global scanout and raw-media PTS spans
+remain global for compatibility. The KMS flip path, PTS plan and
+BO ownership are unchanged by this telemetry-only change.
+
+A second, independently opt-in mode, starting at `15d97c9`,
+makes an otherwise timing-dependent seek reproducible. Set
+`MPV_DRM_STEREO_QUEUE_TEST_HOLD_MS=750` (valid 100..2000)
+with `TWO_SLOT_QUEUE=1` and `PLAN_HOLD=1`.
+After the **first** new pair enters `queued` while another
+remains in `pending`, a one-shot deadline postpones
+future **promotions** of pending for 750ms.
+The physical 120Hz L/R worker continues to flip `active`
+without blocking or sleeping on GPU, GBM or IPC. On the
+producer thread, a single diagnostic marker is printed:
+`Stereo queue test occupied: pending_frame_id=... queued_frame_id=... hold_ms=750`.
+The test harness watches for that marker and sends JSON IPC
+`seek ... absolute+exact` immediately, while this special
+promotion gate is active. At exit,
+`Stereo queue test final: hold_ms=750 triggered=1 hold_blocks=...`
+confirms arming and counts suppressed eligible L promotions.
+
+**Important:** the hold injection intentionally simulates a
+brief video backlog. It may cause `queue_full_skips`,
+PTS discontinuities, additional held frames or visible A/V
+stall, even on a correct driver. It is NOT a jitter, dropped-frame
+or playback-quality benchmark. Run it only in a dedicated
+reproducibility test, NEVER in production. Explicitly unset
+`MPV_DRM_STEREO_QUEUE_TEST_HOLD_MS` for every regular A/B test.
+
+The accompanying updated `mpv_stereo_ipc_stress.py` can be run
+as `./mpv_stereo_ipc_stress.py --occupied-seek`.
+It starts mpv with 750ms hold enabled, waits for the occupancy
+marker, sends an absolute seek to media position 900s before doing
+slow property reads, verifies that the requested position settles,
+plays for 10 seconds, seeks back to the initial position and plays
+another 10 seconds, then gracefully quits to capture final
+stereo statistics. `--occupied-hold-ms` and
+`--occupied-target` customize the stress case.
+The original pause/resume/seeking suite remains the default
+when `--occupied-seek` is omitted.
+
+Look for outdated pre-seek pending/queued generations being
+promoted after the seek boundary, queue pressure or unbounded
+resumption delay; correlate the IPC `.jsonl` action timestamp
+against the two-slot marker and `Stereo PTS sample` segment
+boundaries. This targeted test is not yet validation that all
+seek paths always flush stale pending BOs; if it reveals such a
+race, fix producer seek/reset handling while retaining KMS
+framebuffer lifetime safety.
+
+
+### Forced occupied-queue seek exposed real stale movie frames (2026-10-24)
+
+Repro logs: `mpv-stereo-ipc-stress-20261024-230948-334210.log`
+and `.jsonl`, build `df0c700c`, `QUEUE2=1 PLAN_HOLD=1
+QUEUE_TEST_HOLD_MS=750`. At mpv time 2.112s the producer logged
+`Stereo queue test occupied: pending_frame_id=69
+queued_frame_id=70 hold_ms=750`. JSON IPC issued
+`seek 900 absolute+exact` at 2.118s, with mpv reporting
+`playback restart complete @900.024000` at 2.149s.
+Yet the confirmed-L PTS trace reports generation 35
+frame_id=69 movie_pts=296.463 at MSC 6178296, followed by
+generation 37 frame_id=99 movie_pts=900.733 at MSC 6178306.
+Mapping physical MSC to the report at 1.511s for MSC 6178131
+puts frame 69's *first physical L scanout* at ~2.886s:
+approximately 0.768s after the seek command and
+0.737s after playback restart. The intervening gen 36
+is not in the bounded sample trace and should not be
+asserted as a particular frame without further telemetry.
+
+This is a **real seek correctness failure**: the old
+unpublished pre-seek FIFO outlived the decoder seek and
+was promoted at the end of the forced 750ms gate.
+An mpv IPC seek being accepted or playback-restart
+emitted does NOT mean stale GBM pending/queued BOs were
+flushed. All L/R KMS counters were nevertheless error-free:
+flips=2659, missed_vblanks=0, wrong_eye=0,
+pair_unpresented_discards=0 and in-play commit_errors=0.
+The intentionally full queue recorded 46 full_skips and
+45 gate hold_blocks; queue drained afterwards.
+The new long-gap PTS diagnostic found exactly one
+0.800s reset and produced 495 exact / 500 comparable
+plans: raw test-induced mismatch is not a steady-state
+pacing regression. One source frame_id gap 37->39
+was during startup, before the deliberate seek.
+
+**Fix in commit `c3cf121`:** mpv's
+`reset_playback_state -> reset_video_state ->
+vo_seek_reset -> VOCTRL_RESET` sequence already
+delivers a seek/reconfigure reset to the VO thread.
+The stereo GPU VO previously called only
+`gl_video_reset`, leaving stereo `pending` and
+`queued` owned by the KMS worker.
+The new `vo_drm_stereo_pair_reset(ctx)` detaches
+`building`, `pending` and `queued` under the
+same mutex protecting KMS selection, cancels
+the test hold deadline (without rearming the one-shot),
+and releases the unpublished sync_file FDs + GBM BOs
+on the original VO/EGL thread *after unlocking*.
+`active` and any in-flight or retired KMS buffers
+remain untouched until their ordinary confirmed-flip
+lifetime transition, so eye pairing is preserved.
+VO resets the last-drawn-frame tracking as well.
+
+The fix adds a producer-thread event:
+`Stereo queue seek reset: pending_frame_id=...
+queued_frame_id=... building_frame_id=...`
+only when a nonempty unpublished state was flushed.
+Shutdown diagnostics gain `Stereo queue seek reset final:
+resets=... pending_flushes=... queued_flushes=...
+building_flushes=...`.
+
+**Immediate re-test:** `git pull --ff-only &&
+meson compile -C build` then run
+`mpv_stereo_ipc_stress.py --occupied-seek` with the
+existing 750ms test gate. Verify this time there
+is a producer-side queue-reset log reporting pending
+69 / queued 70 shortly after the IPC seek,
+with nonzero pending and queued flush counters
+and no reappearance of a confirmed-L movie PTS
+from the pre-seek segment after the flush.
+The KMS must continue 120Hz alternating L/R
+with zero missing vblanks. Previously the first
+post-seek confirmed L was old frame 69; after
+the fix the **next newly promoted** pair should
+belong to the new 900s segment, while displaying
+the last pre-seek active pair until then is
+expected/necessary for continuous shutter cadence.
+
+The fix is not yet built or tested on the target i915
+machine. Repeat ordinary pause/seek and steady-state
+test without `QUEUE_TEST_HOLD_MS` after targeted
+revalidation. Observe that intentional seek flush
+counters are not movie-frame loss due to poor GPU
+performance.
+
+
+### Forced occupied-queue seek re-test PASSED after VOCTRL_RESET flush
+
+Test log: `mpv-stereo-ipc-stress-20261024-231757-335731.log`,
+JSON IPC trace `.jsonl`, binary `v0.41.0-dev-g67b4f064d`
+(with implementation commit `c3cf121`). Same i915/Mesa
+DP-1@120Hz, `TWO_SLOT_QUEUE=1`, `PLAN_HOLD=1`,
+and stress-only `QUEUE_TEST_HOLD_MS=750` as preceding
+failed run. Test completed successfully; mpv exit code 0.
+
+Timeline: producer recorded `Stereo queue test occupied`
+with pending frame **77**, queued frame **78** at t=2.404s.
+The test's IPC `seek 900 absolute+exact` arrived at
+t=2.411s. On the VO thread, `VOCTRL_RESET` emitted
+`Stereo queue seek reset: pending_frame_id=77
+queued_frame_id=78 building_frame_id=0` at t=2.419s.
+mpv completed playback restart for media position
+**900.024s** at t=2.457s. The first logged first-L
+confirmed PTS sample after the seek is generation **45**,
+frame ID **90**, PTS **900.024s**, MSC **6292582**.
+The old accepted unpublished frames 77/78 were
+removed before they could be promoted; continued scanout
+of the last pre-seek *active* image until a new L is ready
+is expected and protects eye parity.
+
+Final: `flips=2699 missed_vblanks=0 parity_errors=0
+wrong_eye=0 wrong_hold=0 commit_errors=0
+pair_unpresented_discards=0 fence_errors=0
+pair_update_skips=0`.
+`Stereo queue seek reset final: resets=5
+pending_flushes=2 queued_flushes=1 building_flushes=0`.
+`Stereo two-slot queue final: second_enqueues=204
+second_promotions=203 full_skips=0 gbm_skips=0
+unexpected_incoming=0 remaining_pending=1
+remaining_queued=0`. The 1 second-slot enqueue
+not promoted is an intentional seek flush (not a GPU
+discard); 1 unpublished pending pair at normal shutdown
+is later released by uninit, not a KMS leak.
+One-shot stress gate `triggered=1 hold_blocks=1`;
+seek promptly disarmed its active hold deadline, rather
+than incurring the previous run's 45 blocked L promotions.
+Playback avsync from IPC after the 10s recovery at
+media 910.118 was -1.273ms, and after the return
+seek and another 10s at media 305.138 was -2.149ms
+(mpvs internal status, not a physical AV measurement).
+
+`Stereo plan final: adjacent_compared=522 exact=514
+mismatched=8`; `frame_id_gaps=1` is the preexisting
+startup 37->39 gap, not a post-seek queue eviction.
+`segments=3 discontinuities=2 long_gap_resets=0`;
+the explicit seek canceling the injected hold made
+the interval too short for the 500ms idle-gap threshold.
+At shutdown, as in previous tests, a CRTC restoration
+atomic EINVAL occurs *after* the `commit_errors=0`
+in-play final report; handle separately.
+
+Conclusion: the reproducible occupied-FIFO seek regression
+from the prior run is fixed by flushing unpublished
+pairs on `VOCTRL_RESET`. Do NOT conflate its intentional
+seek flush counts with GPU pressure or missed source
+frames. This stress input now passes, but it has not
+tested every possible seek timing (e.g. an already
+submitted pending first-L commit concurrently with a
+VO reset). The next validation is ordinary pause/seek
+with the stress-only test hold variable unset, followed
+by long-running end-of-file and reconfiguration checks.
+
+
+### Post-seek-reset ordinary IPC stress with pause-aware PTS metrics: PASS
+
+Artifacts: `mpv-stereo-ipc-stress-20261024-232235-336840.log`
+and `.jsonl`, binary `v0.41.0-dev-g67b4f064d`;
+run with `QUEUE2=1 PLAN_HOLD=1`, *without* the artificial
+`QUEUE_TEST_HOLD_MS` injection. Script started the film
+at 295s, ran 140s wall-clock including 18 IPC actions:
+5 pause/resume pairs and 8 seeks. Every IPC action
+succeeded, all 8 seeks settled; player exited normally
+(`code=0`).
+
+During the first 6s pause, `time-pos` remained fixed
+at 306.681s; an exact relative -40s seek *while still paused*
+changed time-pos 388.763->348.765s, preserving `pause=true`
+until explicitly resumed. Final mpv internal
+`avsync=-0.002434s` (~-2.43ms), `vo-delayed-frame-count=0`.
+This does not measure absolute audio-to-photon sync.
+
+**Physical correctness:** 16,751 KMS flips,
+`missed_vblanks=0 parity_errors=0 wrong_eye=0
+wrong_hold=0 commit_errors=0 fence_errors=0`.
+2,890 rendered pairs, 2,885 first-L and first-R
+confirmations. `pair_unpresented_discards=0
+pair_update_skips=0`, no dropped incoming
+generations. This is an interactive test; the difference
+in counts is consistent with intentional queue flushes
+and the final pending pair, not a claim that all
+decoded frames were physically presented.
+
+**Queue correctness:** 974 second-slot enqueues and
+974 promotions, `full_skips=0 gbm_skips=0
+unexpected_incoming=0`; final `remaining_pending=1`,
+`remaining_queued=0` at the pre-release shutdown snapshot.
+The seek/reset diagnostic confirms 11 VO resets,
+four flushing an occupied `pending`, none needing a
+`queued` flush in this non-forced timing run;
+`building_flushes=0`. Unlike the preceding forced
+case, the empty second slot at the instant of seek
+is ordinary and expected.
+
+**Pause-aware diagnostic fix validated:** 5 physical
+idle gaps over 500ms, totaling **15.050s**,
+became new PTS segments (`long_gap_resets=5`,
+`long_gap_ust_s=15.050`); combined summary
+`segments=14 discontinuities=13` reflects the
+eight commanded seeks plus five long gaps.
+`relative_drift_last_ms=+24.498`, instead of
+the previous ordinary IPC test's ~+6,047ms
+pause-contaminated endpoint. This is a raw
+UST-versus-source-PTS *relative* statistic after
+segmenting, not absolute A/V latency. Initial and
+last media-PTS and UST spans in the summary still
+span all segments and **must not** be directly
+compared for time drift under seeks.
+
+**Pacing:** `adjacent_compared=2869 exact=2846
+mismatched=23` (**99.198%** exact), signed-error
++13 cycles and absolute-error 23 cycles.
+The previous pre-pause-aware ordinary IPC test
+showed 2850/2876 (~99.10%), 26 mismatches and
++900 signed-error cycles. Now 1/2/3/4+ actual
+cycles histogram=0/1412/1433/26.
+Of the sparse first-L samples, confirmed startup
+frame IDs 36, 37, and 40 already account for three
+mismatches; the remaining mismatches cannot be
+uniquely located to resume/seek boundaries from
+the bounded once-per-120-frame diagnostic history.
+The one `frame_id_gaps=1` is again startup
+frame 37->39, not a FIFO discard during seek.
+The 99.2% aggregate describes a dynamic stress
+test, not the separate 15-minute steady-state
+99.981% pacing baseline.
+
+All 8 seek-settled IPC events succeeded and the
+last internal AV sync was -2.43ms. The only
+`Failed to commit atomic request: Error number 22`
+occurs after final KMS metrics during CRTC mode
+restoration, not during playback. Nothing in this
+test calls for new changes to the RT KMS scheduler
+or the published two-slot queue implementation.
+
+Next optional tests before making these flags
+the default: exact seek while an in-flight FIRST-L
+commit is pending; rate change and reverse trick
+play; EOF/next-file reconfiguration; repeat
+runs without the forced hold and with stats off.
+
+
+### Playlist EOF -> next file -> idle -> loadfile lifecycle: PASS (2026-10-24)
+
+Logs: `mpv-stereo-playlist-lifecycle-20261024-234112-340233.log`
+and `.jsonl`, binary `v0.41.0-dev-g67b4f064d`,
+with `TWO_SLOT_QUEUE=1 PLAN_HOLD=1` and no artificial
+queue hold. The test used an ordinary copy of the same
+23.976fps Half-SBS source at `/home/life/Веном2.mkv`
+as the second playlist entry; this is intentionally a
+video-output lifecycle test, not a different-codec test.
+One mpv PID (340234) stayed alive across the complete run.
+
+JSON IPC:
+- Initial file warmed up from media 295s, then the next
+  playlist entry was appended with `loadfile ... append`.
+- First file was exact-seeked to 6732.768s (~8s before end).
+  `end-file reason=eof` for playlist entry 1 at wall elapsed
+  **13.430s**; `start-file` entry 2 at **13.445s**;
+  `file-loaded` entry 2 at **13.473s**. The new path was
+  `/home/life/Веном2.mkv`, `playlist-pos=1`, and normal
+  playing progress 295.000->302.803s was verified over 8s.
+- Second file was exact-seeked to 6732.768s and reached
+  genuine `end-file reason=eof` entry 2 at **29.530s**.
+  `core-idle=true`, `playlist-pos=-1`, `path=null`
+  were verified at **29.715s**, without terminating mpv.
+- `loadfile ... replace` at **31.717s** opened the
+  original as playlist entry 3; `start-file` at 31.720s,
+  `file-loaded` at 31.915s; playback progressed from
+  media 295.000->302.677s within 8s and ended the test
+  normally with mpv return code **0** at 40.095s.
+  Final `avsync=-0.003961s`, `vo-delayed-frame-count=0`
+  (mpv internal sync, NOT audio-to-photon measurement).
+
+**VO lifecycle:** There were exactly TWO DRM-stereo context
+initializations and TWO final summaries. mpv **reused the same
+VO/DRM stereo context across the consecutive first and second
+playlist files**, including a producer-side
+`Stereo queue seek reset: pending_frame_id=348 queued_frame_id=0`
+at the first EOF transition. It destroyed the first context
+only upon the **second** EOF (final line at 29.567s), when
+the player entered `idle`; it then created a second
+context on the subsequent explicit `loadfile replace`
+(at ~31.759s). So an automatic playlist transition
+must not be misdescribed as destroying/rebuilding KMS.
+
+**First context, spanning both files:**
+`flips=3489 missed_vblanks=0 parity_errors=0
+wrong_eye=0 wrong_hold=0 commit_errors=0`;
+`pair_renders=684 pair_gen=684 first_eye_L=681
+first_eye_R=681 pair_unpresented_discards=0
+pair_update_skips=0 fence_errors=0`.
+Two-slot FIFO: `second_enqueues=181
+second_promotions=181 full_skips=0 gbm_skips=0
+unexpected_incoming=0 remaining_pending=0
+remaining_queued=0`. Seek/reset telemetry:
+`resets=8 pending_flushes=3 queued_flushes=0
+building_flushes=0`. Planned holds:
+`adjacent_compared=673 exact=665 mismatched=8`;
+interactive startup/EOF/seek transitions are
+included, so this is NOT steady-state pacing.
+The first-L PTS trace explicitly crosses from
+first file PTS 6740.651 to second file PTS 295.003
+at MSC 6608691 -> 6608699, with a reset at the
+source PTS discontinuity, not a stale-generation
+promotion. `frame_id_gaps=1` is the known initial
+37->39 startup gap.
+
+**Second context, original file reloaded from idle:**
+`flips=943 missed_vblanks=0 parity_errors=0
+wrong_eye=0 wrong_hold=0 commit_errors=0`;
+`pair_renders=186 pair_gen=185 first_eye_L=185
+first_eye_R=185 pair_unpresented_discards=0
+pair_update_skips=0 fence_errors=0`.
+Two-slot queue `second_enqueues=0 second_promotions=0
+full_skips=0 gbm_skips=0 remaining_pending=1`
+at the pre-cleanup snapshot, a normal in-flight
+pending frame during quit; GBM release follows.
+`adjacent_compared=183 exact=181 mismatched=2
+frame_id_gaps=0`.
+
+**Resource lifetime:** JSONL `/proc/<pid>/fd` and
+`/proc/<pid>/status` samples during initial playback
+reported `open_fds=63 drm_fds=6 sync_file_fds=6
+dmabuf_fds=1 Threads=32 VmRSS=382416kB`.
+In `idle` following second EOF, both immediately
+and after 2 seconds, resources stabilized at
+`open_fds=22 drm_fds=0 sync_file_fds=0
+dmabuf_fds=0 Threads=17 VmRSS=348900kB`.
+After 8 seconds of new playback, resources were
+`open_fds=63 drm_fds=6 sync_file_fds=6
+dmabuf_fds=1 Threads=32 VmRSS=396224kB`.
+This establishes **no lingering DRM, sync_file
+or DMA-BUF FDs in idle** and confirms teardown and
+reinitialization. It does NOT prove lack of a slow
+GBM/GL process-memory leak: comparing a single live
+RSS from two phases (382 vs 396 MB) is insufficient.
+Repeat e.g. 20 EOF/idle/loadfile cycles to quantify
+any residual memory trend.
+
+**Known separate outstanding problem:** Both DRM
+context final reports show in-play `commit_errors=0`,
+but afterwards `vo/gpu/drm` logs
+`Failed to commit atomic request: Error number 22`
+at **29.658s** and **40.030s**, during CRTC restoration
+when closing a DRM context. This is *not* an in-play
+stereo flip failure and does not stop subsequent VO
+initialization, but the restore failure should be
+separately investigated and must not be described
+as fully successful restoration.
+
+Verdict: automatic consecutive-file playback, last-file
+EOF -> idle teardown and loadfile-replace reinit all
+work in a single mpv process with physical L/R
+integrity intact and no lingering special-purpose
+FDs after idle. No changes to the RT KMS frame scheduler
+are warranted from this log. Remaining independent
+checks: explicit repeated idle/reload cycles for
+leak detection; and the DRM atomic CRTC restoration
+EINVAL on every teardown.
+
+
+### CRTC teardown EINVAL investigation and repeated EOF/idle soak test
+
+Investigation of the two verbose `Failed to commit atomic request:
+Error number 22 occurred` lines at 29.658s/40.030s in the
+2026-10-24 playlist lifecycle log traced them to
+`restore_sdr()` in `video/out/drm_common.c`, **not**
+to `vo_drm_release_crtc()` and **not** to the realtime
+stereo KMS worker. During teardown `restore_sdr()`
+unconditionally invoked `drmModeAtomicCommit()`,
+even when `vo_drm_set_color(..., sRGB)` reported
+that the display colorspace was already SDR.
+The independent stereo worker uses its own atomic
+requests, leaving the generic atomic request potentially
+empty. An empty atomic request commonly returns
+`EINVAL` on i915. The error logger also incorrectly
+passed the libdrm return value `-1` to `mp_strerror`,
+instead of logging `errno`.
+
+**Fix in `49ea1e7`:** skip the SDR restore atomic
+commit if `vo_drm_set_color()` returns false
+(no actual colorspace change). When a colorspace
+change IS requested, retain the commit and log
+failures with `errno`, with a specific warning
+`Failed to restore SDR colorspace: ...`. The
+normal `vo_drm_release_crtc()` old-state modeset
+restore remains separate and untouched. Neither
+the stereo KMS worker nor the buffer queue's
+L/R synchronization logic changed. Based on the
+source and previous logs, this addresses the
+spurious teardown EINVAL; a build and target i915
+retest is required to confirm.
+
+A companion standalone standard-library Python
+harness, `mpv_stereo_eof_idle_cycles.py`, repeats
+**25 cycles** by default using only the original
+Half-SBS video file. Each cycle:
+(1) JSON IPC `loadfile replace` from
+`--idle=yes` in the same mpv PID;
+(2) verify the source media time advances;
+(3) exact-seek to the last four seconds;
+(4) wait for genuine `end-file reason=eof`;
+(5) check `core-idle=true`, `path=null`,
+`playlist-pos=-1`; the playlist entry count may
+remain >0 in idle;
+(6) check dedicated `Stereo DRM final` and
+`Stereo two-slot queue final` exist for this
+cycle and contain zero missed vblank, wrong-eye,
+parity, KMS commit, GPU fence and queue-pressure
+failures; and
+(7) record the number of all FDs, DRM device FDs,
+sync_file FDs, DMA-BUF FDs, thread count and
+`VmRSS` in `/proc/<pid>` while playing and idle.
+The harness treats nonzero specialized DRM-related
+FDs in idle or any new restore error as a test
+failure. The `VmRSS` history is also exported as
+CSV with 25 data rows: gradual RSS change is a
+signal for investigation, not sufficient proof
+of a GBM memory leak because caching is involved.
+
+After `git pull --ff-only && meson compile -C build`
+run `./mpv_stereo_eof_idle_cycles.py --cycles 25`
+(or `--cycles 2` as a quick validation).
+No second movie file is needed. Main artifacts:
+`/tmp/mpv-stereo-eof-idle-cycles-*.log`,
+`.jsonl`, and `.csv`.
+Script Python syntax and fake-IPC two-cycle state
+machine have been tested; only the user machine
+can perform actual DRM/KMS verification.
+
+If the same EINVAL remains on the new build,
+inspect whether the output actually changes from
+HDR to SDR during teardown; the new warning will
+separate genuine SDR restore failures from failed
+old-mode restoration. Compare the new restore
+warning and DRM master/VT handling before altering
+the old CRTC state restoration sequence.
+
+
+### First 2-cycle and 25-cycle EOF/idle soak attempts aborted by harness race
+
+Attached artifacts: `mpv-stereo-eof-idle-cycles-20261024-235606-342765.{log,jsonl,csv}`
+(requested 2 cycles) and
+`mpv-stereo-eof-idle-cycles-20261024-235616-342856.{log,jsonl,csv}`
+(requested 25 cycles). Both used binary `v0.41.0-dev-gbbcb04a9c`
+(including the first SDR commit guard) and aborted
+**before the first playback**, at 0.305s / 0.302s.
+Each `loadfile replace` returned `success`, mpv
+emitted `start-file` and `file-loaded`, and
+`time-pos` returned 295.0. The harness then queried
+`core-idle` ONCE, receiving `true`, and raised
+`cycle 1: still idle after file-loaded`.
+In mpv this is normal: `file-loaded` may precede
+the first decoder/VO playback transition, especially
+with `--idle=yes` and an implicit initial `--start`
+seek. Both scripted runs sent `quit` with return code
+0, 0 EOFs, no physical KMS flips, zero completed
+cycles, and CSV containing headers but **no data rows**.
+These runs provide NO soak-test or memory-leak result.
+
+Additional diagnostic discovered by these early shutdowns:
+the original generic DRM SDR EINVAL diagnostic no longer
+appears, but the new warning
+`Cannot restore SDR colorspace: no atomic request`
+does appear once per run. Source-order review explains
+the warning: the stereo EGL context already invokes
+`vo_drm_release_crtc` before generic `vo_drm_uninit`;
+a very early shutdown can leave `atomic_ctx->request`
+unallocated, and generic `restore_sdr` then tries
+to change SDR color state even though the saved CRTC
+has ALREADY been restored / DRM active flag is false.
+This is a redundant teardown operation, not evidence
+of a live KMS pageflip failure.
+
+**Follow-up commit `6c30ded`:** `restore_sdr()`
+now returns early if `!drm->active`, before touching
+color state or submitting another atomic request.
+The first guard against an unnecessary SDR commit and
+correct use of `errno` remain. Non-stereo active-CRTC
+HDR->SDR restoration remains in place. Target i915
+runtime confirmation remains pending.
+
+**Corrected standalone Python harness**
+`mpv_stereo_eof_idle_cycles.py`: replace the immediate
+`if ipc.get("core-idle") is True: raise RuntimeError`
+after `file-loaded` with a bounded
+`wait_property(..., "core-idle", lambda x: x is False,
+timeout=30)`. Also treat
+`Cannot restore SDR colorspace` as a restore error.
+The revised script passed a two-cycle fake-IPC
+integration test with a deliberately delayed
+`core-idle=false` transition (500ms after
+`file-loaded`); this is a mock validation only.
+
+Repeat `git pull --ff-only && meson compile -C build`,
+**replace the old local script with the corrected
+download**, first run `--cycles 2`, then `--cycles 25`.
+Only then interpret the 25-row CSV idle RSS and
+FD trends, final KMS summaries, and whether
+`restore_sdr` teardown warnings really disappeared.
+
+
+### 2026-10-25: repeated EOF/idle cycles pass 2/2 and 25/25
+
+Revised `mpv_stereo_eof_idle_cycles.py` (wait for
+`core-idle=false` after `file-loaded`) and binary
+`v0.41.0-dev-g9bb593e32` (both SDR teardown fixes).
+Two independent runs:
+`mpv-stereo-eof-idle-cycles-20261025-000530-345048`
+(two cycles, mpv PID 345049) and
+`mpv-stereo-eof-idle-cycles-20261025-000555-345167`
+(25 cycles, mpv PID 345168), each with full
+`.log`, `.jsonl` and `.csv` artifacts.
+
+**Results:** 2/2 and 25/25 cycles passed, both
+processes exited 0 after explicit IPC `quit`.
+The 25-cycle run lasted about 184 seconds, with 25
+distinct `end-file reason=eof` events, 25 separate
+DRM-stereo context initializations and 25 final
+DRM reports. No `Failed to commit atomic request`,
+`Failed to restore previous mode` or
+`Cannot restore SDR colorspace` in either run.
+This confirms that skipping redundant SDR restoration
+after `vo_drm_release_crtc` fixed the observed
+teardown `EINVAL` and premature no-request warning
+on target i915 under the tested SDR workload.
+
+**Physical KMS across all 25 contexts:**
+`flips=19012`, confirmed first-eye-L/R both
+3617, `missed_vblanks=0 parity_errors=0
+wrong_eye=0 wrong_hold=0 commit_errors=0
+fence_errors=0 pair_unpresented_discards=0
+pair_update_skips=0`. There were 168 expected
+`fence_deferrals` (nonblocking readiness checks,
+not errors). Two-slot FIFO counters totaled
+`second_enqueues=491 second_promotions=491`;
+`full_skips=0 gbm_skips=0 unexpected_incoming=0`,
+`remaining_pending=0 remaining_queued=0` at
+every EOF. `VOCTRL_RESET` count 100 across cycles;
+18 pending flushes and zero queued/building flushes
+are intentional reset behavior under these seeks,
+not pressure-induced discards. PTS traces record
+one startup frame ID gap in the first context
+(37->39, familiar startup artifact); none after.
+`planned_exact=3403 / adjacent_compared=3516`
+(96.79%) includes a major seek at every cycle
+and all EOF boundaries, so it does NOT measure
+steady-state smoothness; compare the earlier
+15-minute steady-state 99.981% baseline instead.
+
+**Resource quiescence:** after each of the 25 EOFs,
+`/proc/<pid>/fd` yielded 22 total FDs,
+0 DRM device FDs, 0 sync_file FDs,
+0 DMA-BUF FDs and 17 threads. Both full and
+two-cycle runs have nonempty CSV rows for each
+completed cycle; there is no FD or thread
+accumulation. Every cycle left mpv in
+`core-idle=true` with no active source path.
+The 25-cycle run remained in the same mpv PID,
+and each reload re-created the VO / DRM context.
+
+**Process RSS, 25-cycle run:** idle after first
+EOF=346512 KiB (338.39 MiB); after last EOF=
+360472 KiB (352.02 MiB), +13.63 MiB across
+24 intervals. Runtime memory warms up in the
+first ~10 cycles and then plateaus: for idle
+cycles 11-25 values remain ~347.25-352.02 MiB
+(range <4.8 MiB), with fitted linear slope
+~+0.058 MiB/cycle. The playing RSS on cycles
+11-25 stays ~386.75-389 MiB. This is not
+evidence of ongoing linear GBM/FD growth,
+but process RSS includes allocator and codec
+caches, so cannot strictly disprove a slow leak.
+If necessary, a longer soak with device-specific
+GPU memory accounting (e.g. fdinfo/DRM memory)
+could increase confidence.
+
+**Decision:** this completes the targeted QA
+for the optional `QUEUE2 + PLAN_HOLD` combination
+on i915 / Mesa 26.2.5, including steady-state,
+pause/resume/seek, forced occupied-FIFO seek,
+playlist transition, EOF idle cleanup and repeat
+VO reinitialization. The experimental knobs can
+be considered for *stereo-mode-only* defaults,
+but normal-mode regression and non-i915 driver
+behavior have not been established by these
+tests. Keep opt-out facilities during first
+default-on rollout, and do not enable test
+queue hold injection by default.
+
+
+### 2026-10-25: native-stereo default policy verified by physical IPC run
+
+Test artifacts: `mpv-stereo-ipc-stress-20261025-002437-348760.{log,jsonl}`;
+binary `v0.41.0-dev-g52f962978` on i915 / Intel Iris Xe /
+Mesa 26.2.5, DP-1 2560x1440@120Hz. The independent Python
+policy test used `--policy default --scale 0.25`. Its JSONL
+`launch` event confirms `env_overrides={}` and the
+test removed both environment variables rather than setting
+`=1`; the VO initialization reports exactly
+`Stereo scheduling policy: plan_hold=1 two_slot_queue=1
+(native_3d=1; ...)`, and the JSONL has
+`policy_verified` with both enabled. This is
+the FIRST on-hardware confirmation that the defaults
+introduced at `474c53b` are active without env opt-ins.
+
+The scaled-down 36.5s run executed 18 IPC actions
+(5 pause/resume pairs and 8 exact seeks). All 8
+seeks settled and reported `playback-restart`;
+a 1.5s pause held `time-pos=297.672` constant,
+and a seek while paused went from 363.321 to
+323.323 with `pause=true` until explicit resume.
+`test_complete` succeeded; mpv exited with code 0.
+Final `time-pos=345.971`, `pause=false`,
+`seeking=false`, internal
+`avsync=-0.001734s`, `vo-delayed-frame-count=0`.
+
+DRM summary: `flips=4308 missed_vblanks=0
+parity_errors=0 wrong_eye=0 wrong_hold=0
+pair_renders=731 pair_gen=730 first_eye_L=726
+first_eye_R=726 pair_unpresented_discards=0
+fence_checks=749 fence_promotions=725
+fence_deferrals=23 fence_errors=0
+pair_update_skips=0 commit_errors=0`.
+Two-slot queue: `second_enqueues=179
+second_promotions=179 full_skips=0 gbm_skips=0
+unexpected_incoming=0 remaining_pending=1
+remaining_queued=0` at the pre-release shutdown
+snapshot. The one remaining pending BO is
+normally released during teardown. Queue seek reset:
+`resets=11 pending_flushes=4 queued_flushes=0
+building_flushes=0`, consistent with seek flush
+semantics. Test-only injected queue hold was
+disabled (`hold_ms=0 triggered=0 hold_blocks=0`).
+No warnings or errors, including no atomic
+CRTC/SDR restoration EINVAL.
+
+The MSC plan comparison was
+`adjacent_compared=711 exact=698 mismatched=13`
+(98.17% exact), with
+`signed_error_cycles=33 abs_error_cycles=39`.
+`long_gap_resets=4 long_gap_ust_s=3.433`,
+`segments=13 discontinuities=12`
+(8 seek discontinuities + 4 recognized idle gaps).
+`frame_id_gaps=1` is the familiar startup
+frame 37->39. The source-vs-UST
+`relative_drift_last_ms=552.818` in the
+final segment is **not** real AV desync:
+the final scripted ~500ms pause burst can
+fall near/below the conservative >500ms long-gap
+cutoff and contaminate the wall-clock PTS metric.
+The final IPC `avsync` was -1.734ms. Distinguish
+this measurement artifact from physical KMS
+wrong-eye or frame-timing errors. This test
+deliberately includes startup, short pause bursts,
+seeks and resume transitions; do not directly
+compare its 98.17% plan rate with the 15-minute
+steady-state 99.981% baseline.
+
+**Disposition:** no change to the working realtime
+KMS scheduler or two-slot FIFO is justified by
+the default-on validation. Run `--policy no-plan`,
+`--policy no-queue`, `--policy both-off` separately
+to validate the opt-outs if desired. Also test
+ordinary DRM 2D mode and non-i915 GPUs before
+asserting broader cross-driver compatibility.
+A possible future diagnostic-only refinement
+would use explicit mpv pause-state transitions,
+rather than a wall-clock >500ms heuristic,
+to segment short pause bursts.
+
+
+### 2026-10-25: default-on policy opt-outs verified on i915 (all three pass)
+
+Tested binary `v0.41.0-dev-g52f962978`, Intel Iris Xe
+i915/Mesa 26.2.5 at DP-1 2560x1440@120Hz. IPC test
+`mpv_stereo_ipc_policy_test.py --scale 0.25` ran
+three policy modes independently. All 3 runs contain
+explicit `policy_verified` and `test_complete` events;
+each completed 18 IPC actions, including 5 pause/resume
+pairs and 8 exact seeks, with all seek settlements
+observed and mpv exit code 0. Every run confirmed
+`native_3d=1` and the *expected* actual runtime
+policy, not just its environment setting:
+
+| Policy | Requested env overrides | Reported hold/FIFO | KMS flips | Exact / compared MSC intervals | Unpresented pair discards |
+| --- | --- | --- | ---: | ---: | ---: |
+| default (previous run, 00:24:37) | none | 1/1 | 4308 | 698/711 = 98.17% | 0 |
+| no-plan (00:30:45; PID 349947) | `PLAN_HOLD=0` | 0/1 | 4289 | 377/709 = 53.17% | 0 |
+| no-queue (00:31:39; PID 350045) | `TWO_SLOT_QUEUE=0` | 1/0 | 4287 | 655/679 = 96.47% | 16 |
+| both-off (00:32:25; PID 350138) | both `=0` | 0/0 | 4273 | 510/701 = 72.75% | 5 |
+
+Full filenames: `mpv-stereo-ipc-stress-20261025-003045-349947.{log,jsonl}`,
+`mpv-stereo-ipc-stress-20261025-003139-350045.{log,jsonl}`, and
+`mpv-stereo-ipc-stress-20261025-003225-350138.{log,jsonl}`.
+
+**Hardware integrity on every opt-out run:** `missed_vblanks=0
+parity_errors=0 wrong_eye=0 wrong_hold=0 commit_errors=0
+fence_errors=0 pair_update_skips=0 full_skips=0 gbm_skips=0`;
+none of these tests has a CRTC/SDR restore failure.
+Native fences and independent KMS flips remain functional
+with either presentation policy disabled. `vo-delayed-frame-count=0`
+on all runs; final mpv internal `avsync` values are
+-9.894ms (no-plan), -9.549ms (no-queue), and +1.668ms
+(both-off). These are not audio-to-photon measurements
+and are influenced by the deliberate seek/pause workload.
+
+**Pacing sensitivity:** with `PLAN_HOLD=0`, some film
+frames advance after only ONE complete physical L/R
+cycle despite the previous movie frame's 2/3-cycle
+`planned_vsyncs`: 59 actual `cycles_1` on the
+no-plan run, and 50 on both-off, versus 0 with the
+gate enabled on the no-queue run. No-plan's
+`signed_error_cycles=-10 abs_error_cycles=338`,
+`mismatched=332` reflect the unlocked timing, not
+lost KMS parity. Both-off had `abs_error_cycles=196`
+and 191 mismatches. Each final plan comparison includes
+startup, 5 pauses and 8 seeks, so the rates describe
+dynamic stress behavior, not a controlled steady-state
+throughput benchmark.
+
+**FIFO admission sensitivity:** no-queue reported
+`pair_unpresented_discards=16`,
+`Stereo DRM drops final: newer_generation=16`,
+and `frame_id_gaps=16` with
+`skipped_frame_ids=16` (only 709 confirmed
+first-L compared with 725 for no-plan). Under
+both-off, 5 accepted but as-yet-unpublished frames
+were superseded by newer generations;
+`frame_id_gaps=6` includes startup plus these
+5. With FIFO enabled in the no-plan run,
+`second_enqueues=6 second_promotions=6
+pair_unpresented_discards=0` (one startup ID gap).
+Differences in 16 vs 5 drops across independently
+timed IPC sessions must not be read as proof
+that removing PLAN_HOLD improves retention:
+queue residency and the race with L deadlines
+also change. The FIFO specifically avoids
+superseding accepted generations when both
+slots have capacity.
+
+**Final summary:** the explicit overrides behave as
+designed, all three remain *physically eye-correct*, and
+the default-on **PLAN_HOLD=1 + TWO_SLOT_QUEUE=1**
+continues to offer the strongest measured combination
+on this machine. No modification to scheduling logic
+is warranted. Verify ordinary DRM 2D output separately;
+it has not yet been tested as part of this default-on
+rollout. Testing across other KMS drivers is outstanding.
+
+
+### 2026-10-25: ordinary 2D DRM regression smoke test passes on i915
+
+Target log: `mpv-drm-2d-regression.log`; build
+`v0.41.0-dev-g52f962978`, Intel Iris Xe (i915 1.6.0),
+Mesa 26.2.5, DP-1 2560x1440 @ 120Hz. Invoked:
+
+```sh
+env -u MPV_DRM_STEREO_PLAN_HOLD \
+    -u MPV_DRM_STEREO_TWO_SLOT_QUEUE \
+    ./build/mpv --no-config --vo=gpu --gpu-context=drm \
+    --drm-connector=DP-1 --drm-mode=2560x1440@120 \
+    --drm-stereo-3d=no --start=295 --length=30 \
+    --log-file=/tmp/mpv-drm-2d-regression.log \
+    "/home/life/Веном_Venom (2018) BDRip.Half-SBS.1080p.NNMClub.mkv"
+```
+
+**PASS for ordinary 2D path.** At startup the CLI
+explicitly applied `drm-stereo-3d=no`; DRM atomic
+support was detected, native display mode was
+2560x1440@120, normal VO estimated
+`119.997589 FPS for display sync` (physical
+display refresh, unlike native stereo's logical
+~60Hz). Standard `VO: [gpu] 1920x1080 yuv420p`
+configured with software H.264 decoding and
+PipeWire audio. `playback restart complete @
+295.003000, audio=playing, video=playing`
+at 0.597s, then `audio EOF reached` at
+30.400s, `finished playback, success (reason 0)`
+at 30.565s and `Exiting... (End of file)`
+at 30.569s. The log continues through 30.616s
+shader-cache flushing, but does not independently
+establish the process exit code.
+
+The log contains **no**
+`Stereo scheduling policy`, `Stereo KMS first`,
+`Stereo DRM final`, stereo staging/queue/fence
+initialization or stereo worker reports, supporting
+that normal DRM/EGL page-flip handling was used
+and that the new queue/plan default-on policy
+does not activate for `--drm-stereo-3d=no`.
+The source MKV's `StereoMode=sbs2l` metadata
+does not itself activate native output stereo.
+There are also no `Failed to commit atomic request`,
+`Failed to restore previous mode` or SDR restore
+warnings in this run.
+
+**Scope of evidence:** this is a 30-second 2D
+functional regression smoke test, NOT 2D per-vblank
+timing validation. Normal 2D does not expose the
+custom stereo KMS missed-vblank/parity counters;
+therefore zero *logged errors* does not prove zero
+missed 2D vblanks or perfect real-time pacing.
+No other driver or resolution is covered. With
+this 2D smoke test, the proposed stereo-only
+`QUEUE2 + PLAN_HOLD` default-on rollout has
+passed the requested 2D compatibility checkpoint
+on the tested i915/Mesa system. No new C code
+change is required.

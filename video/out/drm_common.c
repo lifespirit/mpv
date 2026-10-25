@@ -19,6 +19,10 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <fcntl.h>
+#if defined(__linux__)
+#include <linux/sync_file.h>
+#endif
 #include <string.h>
 #include <signal.h>
 #include <sys/ioctl.h>
@@ -91,6 +95,7 @@ enum drm_stereo_async_kind {
     DRM_STEREO_ASYNC_STATS,
     DRM_STEREO_ASYNC_GAP,
     DRM_STEREO_ASYNC_DROP,
+    DRM_STEREO_ASYNC_GPU_PROBE,
 };
 
 struct drm_stereo_async_event {
@@ -104,6 +109,7 @@ struct drm_stereo_async_event {
         } stats;
         struct drm_stereo_async_gap gap;
         struct drm_stereo_async_drop drop;
+        struct drm_stereo_gpu_probe gpu_probe;
     };
 };
 
@@ -180,6 +186,139 @@ void vo_drm_stereo_log_drop(struct vo_drm_state *drm,
     stereo_async_publish(drm);
 }
 
+void vo_drm_stereo_log_gpu_probe(struct vo_drm_state *drm,
+                                  const struct drm_stereo_gpu_probe *probe)
+{
+    if (!drm->opts || !drm->opts->stereo_stats ||
+        probe->fence_fd[0] <= 0 || probe->fence_fd[1] <= 0)
+        return;
+    struct drm_stereo_async_event *e = stereo_async_reserve(drm);
+    if (!e)
+        return;
+    // The real KMS worker continues polling the original descriptors.
+    // Only the normal-priority logger owns these dup'd descriptors.
+    const int left = fcntl(probe->fence_fd[0], F_DUPFD_CLOEXEC, 3);
+    const int right = fcntl(probe->fence_fd[1], F_DUPFD_CLOEXEC, 3);
+    if (left < 0 || right < 0) {
+        if (left >= 0) close(left);
+        if (right >= 0) close(right);
+        atomic_fetch_add_explicit(&drm->stereo_async_log->dropped,
+                                  1, memory_order_relaxed);
+        pthread_mutex_unlock(&drm->stereo_async_log->mutex);
+        return;
+    }
+    e->kind = DRM_STEREO_ASYNC_GPU_PROBE;
+    e->gpu_probe = *probe;
+    e->gpu_probe.fence_fd[0] = left;
+    e->gpu_probe.fence_fd[1] = right;
+    stereo_async_publish(drm);
+}
+
+static void stereo_async_print_gpu_probe(struct vo_drm_state *drm,
+                                         struct drm_stereo_gpu_probe *sample)
+{
+    struct pollfd pfd[2] = {
+        {.fd = sample->fence_fd[0], .events = POLLIN},
+        {.fd = sample->fence_fd[1], .events = POLLIN},
+    };
+    int64_t observed_ns[2] = {0, 0};
+    int64_t kernel_ns[2] = {0, 0};
+    // Bounded 100ms; never delay scanout. poll timestamps are upper
+    // bounds on GPU completion, subject to logger scheduling latency.
+    for (int attempt = 0; attempt < 10; attempt++) {
+        if (pfd[0].fd < 0 && pfd[1].fd < 0)
+            break;
+        int rc = poll(pfd, 2, 10);
+        if (rc <= 0)
+            continue;
+        int64_t now_ns = mp_time_ns();
+        for (int eye = 0; eye < 2; eye++) {
+            if (pfd[eye].fd < 0 ||
+                !(pfd[eye].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)))
+                continue;
+            if (pfd[eye].revents & POLLIN) {
+                observed_ns[eye] = now_ns;
+#if defined(__linux__)
+                // The kernel may expose the actual dma_fence signal
+                // timestamp. Convert raw CLOCK_MONOTONIC time to mpv's
+                // offset monotonic timeline before comparing to ready_ns.
+                struct sync_file_info info = {0};
+                if (!ioctl(pfd[eye].fd, SYNC_IOC_FILE_INFO, &info) &&
+                    info.num_fences > 0 && info.num_fences <= 16) {
+                    struct sync_fence_info fences[16] = {0};
+                    info.sync_fence_info = (uintptr_t)fences;
+                    if (!ioctl(pfd[eye].fd, SYNC_IOC_FILE_INFO, &info)) {
+                        uint64_t latest_ns = 0;
+                        for (unsigned n = 0; n < info.num_fences; n++)
+                            if (fences[n].status == 1 &&
+                                fences[n].timestamp_ns > latest_ns)
+                                latest_ns = fences[n].timestamp_ns;
+                        if (latest_ns) {
+                            // dma_fence timestamps use CLOCK_MONOTONIC,
+                            // whereas mpv prefers CLOCK_MONOTONIC_RAW.
+                            // Subtracting mpv's RAW startup offset from
+                            // a MONOTONIC timestamp introduces seconds of
+                            // error on hosts disciplined by NTP. Bridge
+                            // both time bases using a near-simultaneous
+                            // sample and only then subtract ready_ns.
+                            struct timespec mono = {0};
+                            if (!clock_gettime(CLOCK_MONOTONIC, &mono)) {
+                                int64_t mp_now_ns = mp_time_ns();
+                                int64_t mono_now_ns =
+                                    (int64_t)mono.tv_sec * 1000000000LL +
+                                    mono.tv_nsec;
+                                kernel_ns[eye] =
+                                    (int64_t)latest_ns - mono_now_ns +
+                                    mp_now_ns;
+                            }
+                        }
+                    }
+                }
+#endif
+            }
+            pfd[eye].fd = -1;
+        }
+    }
+    // Close even on timeout/error, exactly once, never the KMS-owned fd.
+    close(sample->fence_fd[0]);
+    close(sample->fence_fd[1]);
+    double gpu_after_failed_L_ms = -1.0;
+    if (sample->dropped_pending && sample->last_l_deferral_age_ns > 0 &&
+        kernel_ns[1]) {
+        gpu_after_failed_L_ms =
+            ((kernel_ns[1] - sample->pair_published_ns) -
+             sample->last_l_deferral_age_ns) / 1000000.0;
+    }
+    MP_INFO(drm, "Stereo GPU probe: generation=%llu frame_id=%llu "
+            "kind=%s last_failed_L_target_msc=%u "
+            "last_failed_L_age_ms=%.3f "
+            "gpu_R_after_failed_L_ms=%.3f "
+            "cpu_render_L_ms=%.3f cpu_render_R_ms=%.3f "
+            "egl_swap_L_ms=%.3f egl_swap_R_ms=%.3f "
+            "fence_export_L_ms=%.3f fence_export_R_ms=%.3f "
+            "fence_observed_L_age_ms=%.3f fence_observed_R_age_ms=%.3f "
+            "fence_kernel_L_age_ms=%.3f fence_kernel_R_age_ms=%.3f "
+            "(age relative to published pair; negative kernel age is possible; "
+            "-1 means unavailable)\n",
+            (unsigned long long)sample->generation,
+            (unsigned long long)sample->frame_id,
+            sample->dropped_pending ? "discard" : "sample",
+            sample->last_l_deferral_target_msc,
+            sample->last_l_deferral_age_ns > 0
+                ? sample->last_l_deferral_age_ns / 1000000.0 : -1.0,
+            gpu_after_failed_L_ms,
+            sample->render_ns[0] / 1000000.0,
+            sample->render_ns[1] / 1000000.0,
+            sample->egl_swap_ns[0] / 1000000.0,
+            sample->egl_swap_ns[1] / 1000000.0,
+            sample->fence_export_ns[0] / 1000000.0,
+            sample->fence_export_ns[1] / 1000000.0,
+            observed_ns[0] ? (observed_ns[0] - sample->pair_published_ns) / 1000000.0 : -1.0,
+            observed_ns[1] ? (observed_ns[1] - sample->pair_published_ns) / 1000000.0 : -1.0,
+            kernel_ns[0] ? (kernel_ns[0] - sample->pair_published_ns) / 1000000.0 : -1.0,
+            kernel_ns[1] ? (kernel_ns[1] - sample->pair_published_ns) / 1000000.0 : -1.0);
+}
+
 static void stereo_async_print_stats(const struct drm_stereo_async_event *event)
 {
     const struct vo_drm_state *drm = &event->stats.state;
@@ -223,7 +362,7 @@ static void stereo_async_print_stats(const struct drm_stereo_async_event *event)
             "fence_deferrals=%llu fence_unready_L=%llu "
             "fence_unready_R=%llu fence_errors=%llu "
             "draws=%llu commit_errors=%llu msc=%u eye=%s "
-            "(video output only; USB disabled)\n",
+            "(video/KMS counters only; separate USB bridge counters in Stereo USB final)\n",
             (unsigned long long)drm->stereo_flips, shown_hz,
             window_hz,
             (unsigned long long)window_missed,
@@ -358,6 +497,9 @@ static void *stereo_async_log_worker(void *opaque)
         case DRM_STEREO_ASYNC_STATS: stereo_async_print_stats(&event); break;
         case DRM_STEREO_ASYNC_GAP: stereo_async_print_gap(q->owner, &event.gap); break;
         case DRM_STEREO_ASYNC_DROP: stereo_async_print_drop(q->owner, &event.drop); break;
+        case DRM_STEREO_ASYNC_GPU_PROBE:
+            stereo_async_print_gpu_probe(q->owner, &event.gpu_probe);
+            break;
         }
     }
     return NULL;
@@ -856,14 +998,30 @@ static drmModeConnector *get_first_connected_connector(const drmModeRes *res,
 static void restore_sdr(struct vo_drm_state *drm)
 {
     struct drm_atomic_context *atomic_ctx = drm->atomic_context;
-    if (!atomic_ctx)
+    // The stereo EGL uninit path releases the CRTC and restores the saved
+    // atomic state before destroying its GBM front buffers. Do not submit
+    // an additional SDR request after that release (or after VT switch):
+    // this DRM FD may no longer be master, and its generic request may
+    // never have been allocated if playback stopped before the first flip.
+    if (!drm->active || !atomic_ctx)
         return;
 
     struct pl_color_space sdr = pl_color_space_srgb;
-    vo_drm_set_color(drm->vo, &sdr);
-    int ret = drmModeAtomicCommit(drm->fd, atomic_ctx->request, DRM_MODE_ATOMIC_ALLOW_MODESET, drm);
-    if (ret)
-        MP_VERBOSE(drm, "Failed to commit atomic request: %s\n", mp_strerror(ret));
+    // No atomic properties need updating when the output is already SDR.
+    // In particular, the independent stereo KMS worker uses its own
+    // atomic requests, so atomic_ctx->request may be empty here; committing
+    // an empty request returns EINVAL on i915 during every VO teardown.
+    if (!vo_drm_set_color(drm->vo, &sdr))
+        return;
+    if (!atomic_ctx->request) {
+        MP_WARN(drm, "Cannot restore SDR colorspace: no atomic request\n");
+        return;
+    }
+    if (drmModeAtomicCommit(drm->fd, atomic_ctx->request,
+                            DRM_MODE_ATOMIC_ALLOW_MODESET, NULL)) {
+        MP_WARN(drm, "Failed to restore SDR colorspace: %s\n",
+                mp_strerror(errno));
+    }
 }
 
 static bool setup_connector(struct vo_drm_state *drm, const drmModeRes *res,
@@ -1459,6 +1617,10 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
         if (drm->stereo_pair_mode && drm->stereo_flip_eye == 0)
             drm->stereo_last_left_ust_us = when_us;
         ++drm->stereo_flips;
+        if (drm->stereo_usb_on_confirmed_flip)
+            drm->stereo_usb_on_confirmed_flip(drm->stereo_usb_opaque,
+                                               drm->stereo_flip_eye, msc,
+                                               when_us);
 
         // Map the *actual confirmed* first LEFT scanout of each pair back
         // to the mpv vo_frame ID and movie PTS copied on atomic submit.
@@ -1506,6 +1668,20 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                     if (id <= drm->stereo_pts_last_frame_id ||
                         pts < drm->stereo_pts_last_media_pts - 0.100 ||
                         pts > drm->stereo_pts_last_media_pts + 5.0) {
+                        reset = true;
+                    } else if (when_us > drm->stereo_pts_last_ust_us &&
+                               when_us - drm->stereo_pts_last_ust_us > 500000) {
+                        // The physical KMS worker continues alternating
+                        // L/R while mpv is paused. The next movie picture
+                        // must not inherit those idle cycles as its hold
+                        // or as a +N second "PTS drift" measurement.
+                        // Conservative threshold: 500ms, far longer
+                        // than an ordinary 2/3-cycle source hold.
+                        // Also covers a long playback stall without
+                        // asserting it was specifically a user pause.
+                        drm->stereo_pts_long_gap_resets++;
+                        drm->stereo_pts_long_gap_ust_us +=
+                            when_us - drm->stereo_pts_last_ust_us;
                         reset = true;
                     } else {
                         uint32_t delta_msc = msc - drm->stereo_pts_last_msc;

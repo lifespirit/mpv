@@ -156,6 +156,19 @@ struct drm_stereo_pts_sample {
 struct drm_stereo_async_log;
 
 // Immutable scalar diagnostic event. Never store pointers to GBM/DRM buffers.
+struct drm_stereo_gpu_probe {
+    uint64_t frame_id;
+    uint64_t generation;
+    int fence_fd[2]; // existing KMS-owned sync_file fds; duplicate on enqueue
+    int64_t pair_published_ns; // mpv CPU monotonic clock
+    int64_t render_ns[2];
+    int64_t egl_swap_ns[2];
+    int64_t fence_export_ns[2];
+    bool dropped_pending; // diagnostic category, not a KMS decision
+    int64_t last_l_deferral_age_ns; // CPU monotonic age at final failed L
+    uint32_t last_l_deferral_target_msc;
+};
+
 struct drm_stereo_async_drop {
     const char *reason; // Fixed string literals owned by the caller.
     uint64_t count, pending_gen, active_gen, frame_id;
@@ -197,6 +210,12 @@ struct vo_drm_state {
     bool vt_switcher_active;
     bool waiting_for_flip;
     struct drm_stereo_async_log *stereo_async_log;
+    // USB is an explicitly opt-in diagnostic. KMS invokes this lightweight
+    // notifier on a physically confirmed flip while holding stereo.mutex.
+    // The function only writes to a lock-free mailbox and nonblocking eventfd.
+    void (*stereo_usb_on_confirmed_flip)(void *opaque, int eye,
+                                         uint32_t msc, uint64_t ust_us);
+    void *stereo_usb_opaque;
 
     // Experimental opt-in SBS shutter-stereo diagnostics (no USB).
     // A submitted eye is tagged with the GBM buffer it belongs to.
@@ -282,6 +301,14 @@ struct vo_drm_state {
     bool stereo_pair_sequence_mode;
     uint64_t stereo_pair_sequence_catchups;
     bool stereo_pair_gpu_wait;
+    bool stereo_pair_plan_hold;
+    uint64_t stereo_pair_plan_early_blocks;
+    uint64_t stereo_pair_plan_due_promotions;
+    uint64_t stereo_pair_plan_late_promotions;
+    uint64_t stereo_pair_plan_anchor_missing;
+    uint64_t stereo_pair_kept_ready_pending;
+    uint64_t stereo_pair_dropped_newer_incoming;
+    uint64_t stereo_pair_render_wakes;
     uint64_t stereo_pair_gpu_waits;
     int64_t stereo_max_gpu_wait_ns;
     // Optional EGL native sync_file FD readiness checks before new pairs
@@ -324,6 +351,9 @@ struct vo_drm_state {
     // First LEFT presentation telemetry (no per-frame KMS logging).
     uint64_t stereo_pts_first_L, stereo_pts_valid_L, stereo_pts_missing_L;
     uint64_t stereo_pts_segments, stereo_pts_discontinuities;
+    // Long wall-clock gaps between confirmed first-L source frames,
+    // typically pause/resume. Those gaps must not count as frame holds.
+    uint64_t stereo_pts_long_gap_resets, stereo_pts_long_gap_ust_us;
     uint64_t stereo_pts_id_gaps;
     uint64_t stereo_pts_cycles_1, stereo_pts_cycles_2;
     uint64_t stereo_pts_cycles_3, stereo_pts_cycles_4plus;
@@ -385,6 +415,10 @@ void vo_drm_wakeup(struct vo *vo);
 // Nonblocking diagnostics: safe while stereo.mutex is held.
 void vo_drm_stereo_log_drop(struct vo_drm_state *drm,
                              const struct drm_stereo_async_drop *drop);
+// Sampled only. The logger duplicates both sync_file descriptors and
+// waits in its normal-priority worker, never on the KMS/GL threads.
+void vo_drm_stereo_log_gpu_probe(struct vo_drm_state *drm,
+                                  const struct drm_stereo_gpu_probe *probe);
 
 bool vo_drm_acquire_crtc(struct vo_drm_state *drm);
 void vo_drm_release_crtc(struct vo_drm_state *drm);
@@ -393,7 +427,12 @@ void vo_drm_release_crtc(struct vo_drm_state *drm);
 // The EGL context remains owned by the VO/rendering thread.
 struct ra_ctx;
 bool vo_drm_stereo_pair_begin_eye(struct ra_ctx *ctx, int eye);
+void vo_drm_stereo_pair_note_eye_render(struct ra_ctx *ctx, int eye,
+                                         int64_t render_ns);
 bool vo_drm_stereo_pair_can_capture(struct ra_ctx *ctx);
+// VOCTRL_RESET from mpv's video seek/reconfigure path: detach unpublished
+// stereo generations while keeping the active/in-flight KMS BOs alive.
+void vo_drm_stereo_pair_reset(struct ra_ctx *ctx);
 void vo_drm_stereo_pair_set_frame_info(struct ra_ctx *ctx,
                                        uint64_t frame_id, double media_pts,
                                        bool pts_valid, int planned_vsyncs,
