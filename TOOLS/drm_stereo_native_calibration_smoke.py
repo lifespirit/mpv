@@ -126,7 +126,8 @@ def main():
                 time.sleep(.3)
                 if call("get_property", "pause") is not False:
                     raise AssertionError("second accept did not resume")
-                call("quit")
+                # mpv may close the IPC socket before acknowledging quit.
+                conn.sendall(json.dumps({"command": ["quit"]}).encode() + b"\n")
             process.wait(timeout=12)
         finally:
             if process.poll() is None:
