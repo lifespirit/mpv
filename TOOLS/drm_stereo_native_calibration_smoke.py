@@ -184,17 +184,17 @@ def main():
                 errors.append(f"USB {field}: nonzero/missing")
     if "Native DRM stereo calibration active before playback" not in content:
         errors.append("missing startup calibration indication")
-    pts_final = re.findall(r"Stereo PTS final:[^\\n]*", content)
+    pts_final = re.findall(r"Stereo PTS final:[^\n]*", content)
     if not pts_final:
         errors.append("missing final movie PTS telemetry")
     else:
         # The second calibration session is intentionally ~300 ms long.
         # It must break the prior movie-frame hold comparison even though
         # it falls below the generic 500 ms playback-stall threshold.
-        reset = re.search(r"\\bnonmovie_resets=(\\d+)", pts_final[-1])
+        reset = re.search(r"\bnonmovie_resets=(\d+)", pts_final[-1])
         if not reset or int(reset.group(1)) < 1:
             errors.append("movie PTS telemetry was not reanchored after calibration")
-        missing = re.search(r"\\bmissing_pts=(\\d+)", pts_final[-1])
+        missing = re.search(r"\bmissing_pts=(\d+)", pts_final[-1])
         if not missing or int(missing.group(1)) < 4:
             errors.append("native synthetic L/R pairs were not confirmed on KMS")
     if len(re.findall(r'Run command: keypress', content)) < 3:
