@@ -7607,6 +7607,8 @@ static void cmd_stereo_calibrate(void *p)
     struct command_ctx *ctx = mpctx->command_ctx;
     const char *action = cmd->args[0].v.s;
     int value = cmd->args[1].v.i;
+    const char *schedule = getenv("MPV_DRM_STEREO_USB_PHASE_SCHED");
+    bool phase_mode = schedule && strcmp(schedule, "1") == 0;
     // Holding a key must not repeatedly enter/leave the calibration screen.
     if (cmd->cmd->repeated && strcmp(action, "adjust") != 0)
         return;
@@ -7619,7 +7621,8 @@ static void cmd_stereo_calibrate(void *p)
         if (!ctx->stereo_calibration_screen)
             ctx->stereo_calibration_tune = !ctx->stereo_calibration_tune;
         stereo_calibration_update_keys(mpctx);
-        set_osd_msg(mpctx, 1, 2000, "3D live eye-timer tuning: %s",
+        set_osd_msg(mpctx, 1, 2000, "3D live %s tuning: %s",
+                    phase_mode ? "USB command phase" : "firmware eye timer",
                     ctx->stereo_calibration_tune ? "ON" : "OFF");
     } else if (strcmp(action, "screen") == 0 ||
                strcmp(action, "accept") == 0) {
@@ -7638,7 +7641,8 @@ static void cmd_stereo_calibrate(void *p)
             ctx->stereo_calibration_screen = true;
             ctx->stereo_calibration_tune = false;
             set_osd_msg(mpctx, 1, 2200,
-                        "3D calibration: arrows=firmware timer, 1..4=pattern, Enter=play");
+                        "3D calibration: arrows=%s, 1..4=pattern, Enter=play",
+                        phase_mode ? "USB command phase" : "firmware timer");
         } else if (ctx->stereo_calibration_screen) {
             int movie = -1;
             if (vo_control(mpctx->video_out, VOCTRL_STEREO_CALIBRATION,
@@ -7673,13 +7677,18 @@ static void cmd_stereo_calibrate(void *p)
                        &value) <= 0) {
             cmd->success = false;
             set_osd_msg(mpctx, 1, 1700,
-                        "3D USB eye-timer control unavailable (enable MPV_DRM_STEREO_USB_CONTROL=1)");
+                        phase_mode
+                            ? "3D USB phase control unavailable (check USB scheduler)"
+                            : "3D USB eye-timer control unavailable (enable MPV_DRM_STEREO_USB_CONTROL=1)");
             return;
         }
-        // FIFO write is not a hardware acknowledgement. The USB worker will
-        // log the effective eye-timer value after processing this command.
+        // In predictive mode the VO atomically sets the host deadline offset
+        // and wakes the USB scheduler. In legacy mode it queues a FIFO
+        // firmware timer update, which is only acknowledged by USB worker.
         set_osd_msg(mpctx, 1, 1100,
-                    "3D firmware eye timer: queued %+d us (not optical phase)",
+                    phase_mode
+                        ? "3D USB send phase: %+d us (negative=earlier, positive=later)"
+                        : "3D firmware eye timer: queued %+d us (not optical phase)",
                     value);
     } else {
         cmd->success = false;
