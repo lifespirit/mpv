@@ -7578,10 +7578,10 @@ static bool stereo_calibration_auto_enabled(struct MPContext *mpctx)
 {
 #if HAVE_DRM
     const char *env = getenv("MPV_DRM_STEREO_CALIBRATION");
-    if (!env || strcmp(env, "1") != 0)
-        return false;
     struct drm_opts *opts = mp_get_config_group(mpctx, mpctx->global, &drm_conf);
-    bool enabled = opts->stereo_3d;
+    bool enabled = opts->stereo_3d &&
+        (opts->stereo_calibration == 1 ||
+         (env && strcmp(env, "1") == 0));
     talloc_free(opts);
     return enabled;
 #else
