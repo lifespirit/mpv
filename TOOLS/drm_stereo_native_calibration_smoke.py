@@ -68,7 +68,7 @@ def main():
                      "MPV_DRM_STEREO_USB", "MPV_DRM_STEREO_USB_CONTROL",
                      "MPV_DRM_STEREO_USB_DRY_RUN", "NVSTUSB_EYE_TIMER_US"):
             env.pop(name, None)
-        env["MPV_DRM_STEREO_CALIBRATION"] = "1"
+        env.pop("MPV_DRM_STEREO_CALIBRATION", None)
         env["MPV_DRM_STEREO_USB"] = "1"
         env["MPV_DRM_STEREO_USB_DRY_RUN"] = "1"
         cmd = [
@@ -76,6 +76,7 @@ def main():
             "--input-terminal=no", "--vo=gpu", "--gpu-context=drm",
             f"--drm-connector={args.connector}", f"--drm-mode={args.mode}",
             "--drm-vrr-enabled=no", "--drm-stereo-3d=yes",
+            "--drm-stereo-calibration=before-play",
             "--drm-stereo-pacing-eye=right", "--video-sync=display-resample",
             "--no-audio", "--no-sub", f"--input-ipc-server={ipc}",
             f"--log-file={args.log.resolve()}", str(args.video.resolve())]
