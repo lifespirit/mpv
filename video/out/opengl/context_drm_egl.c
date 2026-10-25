@@ -28,6 +28,7 @@
 #include <stdatomic.h>
 #include <sys/stat.h>
 #include <sys/eventfd.h>
+#include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -119,6 +120,18 @@ struct stereo_usb {
     int event_fd;
     int control_fd;
     char *control_path;
+    // Opt-in MSC/UST phase scheduler. This never modifies the firmware timer
+    // after its rate-derived initialization. timer_fd belongs to USB thread.
+    bool phase_scheduler;
+    int timer_fd;
+    int64_t phase_period_ns;
+    atomic_int phase_us; // signed command offset from TARGET vblank
+    atomic_uint_fast64_t phase_adjustments;
+    uint64_t phase_armed, phase_sent, phase_deadline_misses;
+    uint64_t phase_stale_drops, phase_parity_drops, phase_reanchors;
+    uint64_t phase_too_late_to_arm, phase_timer_expirations;
+    int64_t phase_min_error_ns, phase_max_error_ns;
+    int64_t phase_error_sum_ns;
     uint64_t control_updates, control_errors;
     int final_eye_timer_us;
     bool started;
