@@ -1638,6 +1638,10 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                 !drm->stereo_submit_frame_id ||
                 !isfinite(drm->stereo_submit_media_pts)) {
                 drm->stereo_pts_missing_L++;
+                // Calibration frames have no movie PTS/ID. A movie
+                // resumed after any such pair must NOT inherit the
+                // intervening L/R cycles as its predecessor's hold.
+                drm->stereo_pts_nonmovie_pending = true;
             } else {
                 const double pts = drm->stereo_submit_media_pts;
                 const uint64_t id = drm->stereo_submit_frame_id;
@@ -1662,7 +1666,13 @@ static void drm_pflip_cb(int fd, unsigned int msc, unsigned int sec,
                 uint64_t frame_id_gap = 0;
                 int previous_plan = -1;
                 bool plan_comparable = false;
-                bool reset = !drm->stereo_pts_valid_L;
+                bool reset = !drm->stereo_pts_valid_L ||
+                             drm->stereo_pts_nonmovie_pending;
+                if (drm->stereo_pts_nonmovie_pending) {
+                    if (drm->stereo_pts_valid_L)
+                        drm->stereo_pts_nonmovie_resets++;
+                    drm->stereo_pts_nonmovie_pending = false;
+                }
                 if (!reset) {
                     // Seek/reconfig or source PTS discontinuity: start a
                     // new relative anchor, never accumulate stale drift or
