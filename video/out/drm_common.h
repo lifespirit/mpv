@@ -439,5 +439,7 @@ void vo_drm_stereo_pair_set_frame_info(struct ra_ctx *ctx,
                                        bool display_synced);
 // Pace the mpv display-synced VO independently of the KMS scanout worker.
 void vo_drm_stereo_pair_wait_vsync(struct ra_ctx *ctx);
+// Enqueue a short command to the independent USB worker, without libusb on VO.
+bool vo_drm_stereo_usb_timer_adjust(struct ra_ctx *ctx, int delta_us);
 
 #endif

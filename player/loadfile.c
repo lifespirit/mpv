@@ -20,6 +20,8 @@
 #include <inttypes.h>
 #include <assert.h>
 #include <time.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include <libavutil/avutil.h>
 
@@ -57,6 +59,9 @@
 #include "sub/dec_sub.h"
 #include "external_files.h"
 #include "video/out/vo.h"
+#if HAVE_DRM
+#include "video/out/drm_common.h"
+#endif
 
 #include "core.h"
 #include "command.h"
@@ -1804,6 +1809,18 @@ static void play_current_file(struct MPContext *mpctx)
     };
 
     mp_notify(mpctx, MPV_EVENT_START_FILE, &start_event);
+#if HAVE_DRM
+    // Pause media before playback while the native L/R test pair is scanned
+    // continuously by the independent DRM worker. No test movie required.
+    const char *calib = getenv("MPV_DRM_STEREO_CALIBRATION");
+    if (calib && strcmp(calib, "1") == 0) {
+        struct drm_opts *drm_opts =
+            mp_get_config_group(mpctx, mpctx->global, &drm_conf);
+        if (drm_opts->stereo_3d)
+            opts->pause = true;
+        talloc_free(drm_opts);
+    }
+#endif
 
     mp_cancel_reset(mpctx->playback_abort);
 

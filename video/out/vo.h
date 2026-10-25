@@ -133,6 +133,11 @@ enum mp_voctrl {
     // Clipboard
     VOCTRL_GET_CLIPBOARD,               // struct voctrl_clipboard*
     VOCTRL_SET_CLIPBOARD,
+    // Experimental native DRM 3D: -1 movie, 0 L-white, 1 R-white,
+    // 2 both-white, 3 both-black (argument int*).
+    VOCTRL_STEREO_CALIBRATION,
+    // Signed firmware eye-timer change in us (argument int*).
+    VOCTRL_STEREO_USB_TIMER_ADJUST,
 };
 
 // Helper to expose what kind of content is currently playing to the VO.

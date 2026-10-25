@@ -62,6 +62,8 @@ struct gpu_priv {
     bool stereo_pair_valid;
     uint64_t stereo_pair_last_frame_id;
     struct mp_rect stereo_full_src;
+    int stereo_calibration_pattern; // -1=movie, 0..3=constant L/R test pair
+    bool stereo_calibration_drawn;
 };
 static void resize(struct vo *vo)
 {
@@ -95,6 +97,43 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 
 #if HAVE_DRM
     if (p->stereo_pair) {
+        // The calibration pair follows the SAME EGL/native-fence/GBM/KMS
+        // pipeline as a movie pair. Once published, the existing KMS worker
+        // scans it out forever, alternating eyes at each physical MSC.
+        if (p->stereo_calibration_pattern >= 0) {
+            if (p->stereo_calibration_drawn)
+                return VO_TRUE;
+            if (!vo_drm_stereo_pair_can_capture(p->ctx))
+                return VO_TRUE;
+            int pat = p->stereo_calibration_pattern;
+            uint64_t before = vo->drm->stereo_pair_rendered;
+            // Do not attribute calibration frames to movie frame-id/PTS plans.
+            vo_drm_stereo_pair_set_frame_info(p->ctx, 0, 0, false, 0, false);
+            for (int eye = 0; eye < 2; eye++) {
+                if (!vo_drm_stereo_pair_begin_eye(p->ctx, eye))
+                    return VO_FALSE;
+                struct ra_fbo fbo;
+                if (!sw->fns->start_frame(sw, &fbo))
+                    return VO_FALSE;
+                bool white = pat == 2 || (pat == 0 && eye == 0) ||
+                             (pat == 1 && eye == 1);
+                float color[4] = {white ? 1.0f : 0.0f,
+                                  white ? 1.0f : 0.0f,
+                                  white ? 1.0f : 0.0f, 1.0f};
+                p->ctx->ra->fns->clear(p->ctx->ra, fbo.tex, color, NULL);
+                vo->drm->stereo_draw_eye = eye;
+                ++vo->drm->stereo_draws;
+                vo_drm_stereo_pair_note_eye_render(p->ctx, eye, 0);
+                if (!sw->fns->submit_frame(sw, frame))
+                    return VO_FALSE;
+                sw->fns->swap_buffers(sw);
+            }
+            vo_drm_stereo_pair_begin_eye(p->ctx, -1);
+            if (vo->drm->stereo_pair_rendered == before)
+                return VO_FALSE;
+            p->stereo_calibration_drawn = true;
+            return VO_TRUE;
+        }
         // The VO thread remains mpv's decoder-side producer. An independent
         // KMS thread repeatedly scans out the last completed L/R pair.
         // Don't draw twice at 120 Hz when the source only changes at ~24 Hz.
@@ -315,6 +354,34 @@ static int control(struct vo *vo, uint32_t request, void *data)
     struct gpu_priv *p = vo->priv;
 
     switch (request) {
+    case VOCTRL_STEREO_CALIBRATION: {
+#if HAVE_DRM
+        if (!p->stereo_pair || !data)
+            return VO_FALSE;
+        int pattern = *(int *)data;
+        if (pattern < -1 || pattern > 3)
+            return VO_FALSE;
+        if (pattern != p->stereo_calibration_pattern) {
+            // Detach pending/queued but retain active and in-flight pairs.
+            // Never reset the physical MSC counter or USB synchronization.
+            vo_drm_stereo_pair_reset(p->ctx);
+            p->stereo_calibration_pattern = pattern;
+            p->stereo_calibration_drawn = false;
+            p->stereo_pair_valid = false;
+            vo->want_redraw = true;
+        }
+        return VO_TRUE;
+#else
+        return VO_FALSE;
+#endif
+    }
+    case VOCTRL_STEREO_USB_TIMER_ADJUST:
+#if HAVE_DRM
+        return p->stereo_pair && data &&
+               vo_drm_stereo_usb_timer_adjust(p->ctx, *(int *)data);
+#else
+        return VO_FALSE;
+#endif
     case VOCTRL_SET_PANSCAN:
         resize(vo);
         return VO_TRUE;
@@ -346,6 +413,7 @@ static int control(struct vo *vo, uint32_t request, void *data)
             vo_drm_stereo_pair_reset(p->ctx);
             p->stereo_pair_valid = false;
             p->stereo_pair_last_frame_id = 0;
+            p->stereo_calibration_drawn = false;
         }
 #endif
         return true;
@@ -468,6 +536,9 @@ static int preinit(struct vo *vo)
     const char *pair_env = getenv("MPV_DRM_STEREO_PAIR");
     p->stereo_pair = native_3d ||
         (pair_env && strcmp(pair_env, "1") == 0);
+    const char *calib = getenv("MPV_DRM_STEREO_CALIBRATION");
+    p->stereo_calibration_pattern =
+        native_3d && calib && strcmp(calib, "1") == 0 ? 0 : -1;
     if (p->stereo_pair && !p->stereo_test) {
         MP_ERR(vo, "MPV_DRM_STEREO_PAIR requires MPV_DRM_STEREO_SBS=1\n");
         goto err_out;

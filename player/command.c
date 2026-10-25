@@ -66,6 +66,9 @@
 #include "options/parse_configfile.h"
 #include "osdep/getpid.h"
 #include "video/out/vo.h"
+#if HAVE_DRM
+#include "video/out/drm_common.h"
+#endif
 #include "video/csputils.h"
 #include "video/hwdec.h"
 #include "audio/aframe.h"
@@ -127,6 +130,12 @@ struct command_ctx {
     int hwdec_osd_mode;
 
     double cached_window_scale;
+
+    // These states belong to the player, never to the DRM KMS/USB threads.
+    bool stereo_calibration_screen;
+    bool stereo_calibration_tune;
+    bool stereo_calibration_saved_pause;
+    int stereo_calibration_pattern;
 };
 
 static const struct m_option script_props_type = {
@@ -7523,6 +7532,157 @@ static void cmd_discnav(void *p)
     mp_wakeup_core(mpctx);
 }
 
+
+// Temporary input sections override arrow-key seeking only when needed.
+// Users can still override these bindings with their own named sections.
+static void stereo_calibration_update_keys(struct MPContext *mpctx)
+{
+    struct command_ctx *ctx = mpctx->command_ctx;
+    static const char *const adjustments =
+        "LEFT stereo-calibrate adjust -100\n"
+        "RIGHT stereo-calibrate adjust 100\n"
+        "UP stereo-calibrate adjust 25\n"
+        "DOWN stereo-calibrate adjust -25\n"
+        "c stereo-calibrate tune\n"
+        "C stereo-calibrate screen\n";
+    static const char *const patterns =
+        "LEFT stereo-calibrate adjust -100\n"
+        "RIGHT stereo-calibrate adjust 100\n"
+        "UP stereo-calibrate adjust 25\n"
+        "DOWN stereo-calibrate adjust -25\n"
+        "1 stereo-calibrate pattern 0\n"
+        "2 stereo-calibrate pattern 1\n"
+        "3 stereo-calibrate pattern 2\n"
+        "4 stereo-calibrate pattern 3\n"
+        "ENTER stereo-calibrate accept\n"
+        "ESC stereo-calibrate accept\n"
+        "C stereo-calibrate screen\n";
+    mp_input_disable_section(mpctx->input, "drm-stereo-tune");
+    mp_input_disable_section(mpctx->input, "drm-stereo-screen");
+    if (ctx->stereo_calibration_screen) {
+        mp_input_define_section(mpctx->input, "drm-stereo-screen",
+                                "native DRM stereo calibration", (char *)patterns,
+                                true, "drm-stereo");
+        mp_input_enable_section(mpctx->input, "drm-stereo-screen",
+                                MP_INPUT_ON_TOP);
+    } else if (ctx->stereo_calibration_tune) {
+        mp_input_define_section(mpctx->input, "drm-stereo-tune",
+                                "native DRM stereo tuning", (char *)adjustments,
+                                true, "drm-stereo");
+        mp_input_enable_section(mpctx->input, "drm-stereo-tune",
+                                MP_INPUT_ON_TOP);
+    }
+}
+
+static bool stereo_calibration_auto_enabled(struct MPContext *mpctx)
+{
+#if HAVE_DRM
+    const char *env = getenv("MPV_DRM_STEREO_CALIBRATION");
+    if (!env || strcmp(env, "1") != 0)
+        return false;
+    struct drm_opts *opts = mp_get_config_group(mpctx, mpctx->global, &drm_conf);
+    bool enabled = opts->stereo_3d;
+    talloc_free(opts);
+    return enabled;
+#else
+    return false;
+#endif
+}
+
+static bool stereo_calibration_vo(struct MPContext *mpctx)
+{
+#if HAVE_DRM
+    return mpctx->video_out && mpctx->video_out->drm &&
+           mpctx->video_out->drm->opts &&
+           mpctx->video_out->drm->opts->stereo_3d;
+#else
+    return false;
+#endif
+}
+
+static void cmd_stereo_calibrate(void *p)
+{
+    struct mp_cmd_ctx *cmd = p;
+    struct MPContext *mpctx = cmd->mpctx;
+    struct command_ctx *ctx = mpctx->command_ctx;
+    const char *action = cmd->args[0].v.s;
+    int value = cmd->args[1].v.i;
+    if (!stereo_calibration_vo(mpctx)) {
+        cmd->success = false;
+        return;
+    }
+
+    if (strcmp(action, "tune") == 0) {
+        if (!ctx->stereo_calibration_screen)
+            ctx->stereo_calibration_tune = !ctx->stereo_calibration_tune;
+        stereo_calibration_update_keys(mpctx);
+        set_osd_msg(mpctx, 1, 2000, "3D live eye-timer tuning: %s",
+                    ctx->stereo_calibration_tune ? "ON" : "OFF");
+    } else if (strcmp(action, "screen") == 0 ||
+               strcmp(action, "accept") == 0) {
+        bool entering = strcmp(action, "screen") == 0 &&
+                        !ctx->stereo_calibration_screen;
+        if (entering) {
+            ctx->stereo_calibration_saved_pause = mpctx->opts->pause;
+            set_pause_state(mpctx, true);
+            int pattern = ctx->stereo_calibration_pattern;
+            if (vo_control(mpctx->video_out, VOCTRL_STEREO_CALIBRATION,
+                           &pattern) <= 0) {
+                set_pause_state(mpctx, ctx->stereo_calibration_saved_pause);
+                cmd->success = false;
+                return;
+            }
+            ctx->stereo_calibration_screen = true;
+            ctx->stereo_calibration_tune = false;
+            set_osd_msg(mpctx, 1, 2200,
+                        "3D calibration: arrows=firmware timer, 1..4=pattern, Enter=play");
+        } else if (ctx->stereo_calibration_screen) {
+            int movie = -1;
+            if (vo_control(mpctx->video_out, VOCTRL_STEREO_CALIBRATION,
+                           &movie) <= 0) {
+                cmd->success = false;
+                return;
+            }
+            ctx->stereo_calibration_screen = false;
+            ctx->stereo_calibration_tune = false;
+            set_pause_state(mpctx, ctx->stereo_calibration_saved_pause);
+            set_osd_msg(mpctx, 1, 1200, "3D calibration finished");
+        } else {
+            cmd->success = false;
+            return;
+        }
+        stereo_calibration_update_keys(mpctx);
+    } else if (strcmp(action, "pattern") == 0) {
+        if (!ctx->stereo_calibration_screen || value < 0 || value > 3) {
+            cmd->success = false;
+            return;
+        }
+        if (vo_control(mpctx->video_out, VOCTRL_STEREO_CALIBRATION,
+                       &value) <= 0) {
+            cmd->success = false;
+            return;
+        }
+        ctx->stereo_calibration_pattern = value;
+    } else if (strcmp(action, "adjust") == 0) {
+        if ((!ctx->stereo_calibration_screen && !ctx->stereo_calibration_tune) ||
+            value < -1000 || value > 1000 || value == 0 ||
+            vo_control(mpctx->video_out, VOCTRL_STEREO_USB_TIMER_ADJUST,
+                       &value) <= 0) {
+            cmd->success = false;
+            set_osd_msg(mpctx, 1, 1700,
+                        "3D USB eye-timer control unavailable (enable MPV_DRM_STEREO_USB_CONTROL=1)");
+            return;
+        }
+        // FIFO write is not a hardware acknowledgement. The USB worker will
+        // log the effective eye-timer value after processing this command.
+        set_osd_msg(mpctx, 1, 1100,
+                    "3D firmware eye timer: queued %+d us (not optical phase)",
+                    value);
+    } else {
+        cmd->success = false;
+    }
+}
+
 static void cmd_flush_status_line(void *p)
 {
     struct mp_cmd_ctx *cmd = p;
@@ -8104,6 +8264,10 @@ const struct mp_cmd_def mp_cmds[] = {
           {"y", OPT_DOUBLE(v.d), OPTDEF_DOUBLE(-1)} },
     },
 
+    { "stereo-calibrate", cmd_stereo_calibrate,
+        { {"action", OPT_STRING(v.s)},
+          {"value", OPT_INT(v.i), OPTDEF_INT(0)} },
+        .allow_auto_repeat = true },
     { "flush-status-line", cmd_flush_status_line, { {"clear", OPT_BOOL(v.b)} } },
 
     { "notify-property", cmd_notify_property, { {"property", OPT_STRING(v.s)} } },
@@ -8209,9 +8373,30 @@ static void command_event(struct MPContext *mpctx, int event, void *arg)
     struct command_ctx *ctx = mpctx->command_ctx;
 
     if (event == MPV_EVENT_START_FILE) {
+        mp_input_disable_section(mpctx->input, "drm-stereo-screen");
+        mp_input_disable_section(mpctx->input, "drm-stereo-tune");
+        ctx->stereo_calibration_saved_pause = mpctx->opts->pause;
+        ctx->stereo_calibration_screen = false;
+        ctx->stereo_calibration_tune = false;
+        ctx->stereo_calibration_pattern = 0;
         ctx->last_seek_pts = MP_NOPTS_VALUE;
         ctx->marked_pts = MP_NOPTS_VALUE;
         ctx->marked_permanent = false;
+    }
+
+    if (event == MPV_EVENT_FILE_LOADED &&
+        stereo_calibration_auto_enabled(mpctx)) {
+        ctx->stereo_calibration_screen = true;
+        stereo_calibration_update_keys(mpctx);
+        MP_INFO(mpctx, "Native DRM stereo calibration active before playback\n");
+    }
+    if (event == MPV_EVENT_END_FILE) {
+        mp_input_disable_section(mpctx->input, "drm-stereo-screen");
+        mp_input_disable_section(mpctx->input, "drm-stereo-tune");
+        if (ctx->stereo_calibration_screen)
+            set_pause_state(mpctx, ctx->stereo_calibration_saved_pause);
+        ctx->stereo_calibration_screen = false;
+        ctx->stereo_calibration_tune = false;
     }
 
     if (event == MPV_EVENT_PLAYBACK_RESTART) {

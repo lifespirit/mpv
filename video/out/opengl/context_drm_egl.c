@@ -2452,6 +2452,21 @@ shutdown:
     return NULL;
 }
 
+// Only the USB owner thread mutates firmware state. The VO only writes one
+// short atomic FIFO command and never blocks KMS on libusb traffic.
+bool vo_drm_stereo_usb_timer_adjust(struct ra_ctx *ctx, int delta_us)
+{
+    struct priv *p = ctx->priv;
+    struct stereo_usb *u = p ? &p->stereo.usb : NULL;
+    if (!u || !u->started || u->control_fd < 0 ||
+        delta_us < -5000 || delta_us > 5000 || !delta_us)
+        return false;
+    char command[32];
+    int len = snprintf(command, sizeof(command), "%+d\n", delta_us);
+    return len > 0 && (size_t)len < sizeof(command) &&
+           write(u->control_fd, command, len) == len;
+}
+
 // Called from drm_egl_init(), BEFORE any movie frame can start the KMS
 // worker. Synchronously gate the initial stereo display on emitter readiness,
 // but never do USB I/O or wait in the 120Hz KMS page-flip thread.
