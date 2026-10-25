@@ -2349,6 +2349,7 @@ static void stereo_usb_predicted_loop(struct stereo_usb *u, void *dev,
             }
         }
 
+        bool phase_timer_failed = false;
         if (!armed && have_obs) {
             // Only one/two slots ahead of a confirmed scanout. This is NOT
             // a free-running shutter oscillator; absent KMS notifications
@@ -2368,6 +2369,7 @@ static void stereo_usb_predicted_loop(struct stereo_usb *u, void *dev,
                     u->usb_errors++;
                     MP_ERR(ctx, "Stereo USB phase: timerfd_settime failed: %s\n",
                            mp_strerror(errno));
+                    phase_timer_failed = true;
                     break;
                 }
                 due_ns = target_ns;
@@ -2379,6 +2381,8 @@ static void stereo_usb_predicted_loop(struct stereo_usb *u, void *dev,
                 break;
             }
         }
+        if (phase_timer_failed)
+            break; // Never continue silently without scheduled shutter timing.
     }
 }
 
@@ -2531,9 +2535,10 @@ static void *stereo_usb_sender_thread(void *opaque)
         }
     }
     MP_INFO(ctx, "Stereo USB: sender initialized at %.3fHz "
-            "(dry_run=%d inverted=%d, confirmed KMS flip trigger, "
+            "(dry_run=%d inverted=%d transport=%s, "
             "optical phase UNCALIBRATED)\n",
-            u->refresh_hz, u->dry_run, u->invert_eyes);
+            u->refresh_hz, u->dry_run, u->invert_eyes,
+            u->phase_scheduler ? "predicted-MSC" : "confirmed-flip");
     atomic_store_explicit(&u->init_status, 1, memory_order_release);
     if (u->phase_scheduler) {
         MP_INFO(ctx, "Stereo USB phase: predicted MSC/UST scheduler active "
@@ -2727,8 +2732,10 @@ shutdown:
     return NULL;
 }
 
-// Only the USB owner thread mutates firmware state. The VO only writes one
-// short atomic FIFO command and never blocks KMS on libusb traffic.
+// Only the USB owner thread mutates firmware state or invokes libusb.
+// In legacy mode VO writes one short firmware-control FIFO command.
+// In predictive mode VO adjusts an atomic HOST deadline offset and wakes the
+// USB owner through eventfd. Neither mode blocks the KMS callback.
 bool vo_drm_stereo_usb_timer_adjust(struct ra_ctx *ctx, int delta_us)
 {
     struct priv *p = ctx->priv;
