@@ -120,7 +120,14 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
                 float color[4] = {white ? 1.0f : 0.0f,
                                   white ? 1.0f : 0.0f,
                                   white ? 1.0f : 0.0f, 1.0f};
-                p->ctx->ra->fns->clear(p->ctx->ra, fbo.tex, color, NULL);
+                // ra_gl.gl_clear() unconditionally dereferences scissor.
+                // NULL here crashed mpv with SIGSEGV on the first pattern.
+                struct mp_rect full = {
+                    .x0 = 0, .y0 = 0,
+                    .x1 = fbo.tex->params.w,
+                    .y1 = fbo.tex->params.h,
+                };
+                p->ctx->ra->fns->clear(p->ctx->ra, fbo.tex, color, &full);
                 vo->drm->stereo_draw_eye = eye;
                 ++vo->drm->stereo_draws;
                 vo_drm_stereo_pair_note_eye_render(p->ctx, eye, 0);
