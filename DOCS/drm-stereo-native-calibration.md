@@ -46,6 +46,20 @@ To launch without initial calibration, use `--drm-stereo-calibration=manual`
 remain available whenever native 3D is active. The older opt-in environment
 variable `MPV_DRM_STEREO_CALIBRATION=1` remains supported.
 
+## KMS/PTS telemetry across the calibration screen
+
+Calibration images intentionally have no movie PTS or frame ID. Every
+confirmed first-L scanout of these images marks a non-movie interval.
+When a movie resumes, the PTS and requested-hold comparison reanchors
+at that new frame. This prevents the deliberate calibration pause being
+reported as a movie hold error. Look for `nonmovie_resets=1` (or more)
+in `Stereo PTS final` after a movie→screen→movie transition.
+
+The raw first-to-last scanout span can still include intentional pauses;
+use the per-segment relative-drift data and adjacent comparable frame
+counts for movie timing validation. The diagnostic does **not** change
+MSC/USB scheduling or the calibration pattern itself.
+
 ## Important limitations
 
 This is an **unbuilt** experimental change pending compilation on the target
