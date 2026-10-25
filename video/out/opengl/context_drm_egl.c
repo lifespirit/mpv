@@ -2996,6 +2996,31 @@ static void stereo_usb_stop(struct ra_ctx *ctx)
             (unsigned long long)u->control_updates,
             (unsigned long long)u->control_errors,
             u->final_eye_timer_us);
+    if (u->phase_scheduler) {
+        MP_INFO(ctx, "Stereo USB scheduler final: mode=predicted "
+                "phase_us=%d fixed_eye_timer_us=%d "
+                "phase_adjustments=%llu phase_armed=%llu "
+                "phase_sent=%llu timer_expirations=%llu "
+                "deadline_misses=%llu stale_drops=%llu parity_drops=%llu "
+                "too_late_to_arm=%llu reanchors=%llu "
+                "min_dispatch_error_us=%.3f avg_dispatch_error_us=%.3f "
+                "max_dispatch_error_us=%.3f "
+                "(host send call timing, NOT optical IR measurement)\n",
+                atomic_load(&u->phase_us), u->final_eye_timer_us,
+                (unsigned long long)atomic_load(&u->phase_adjustments),
+                (unsigned long long)u->phase_armed,
+                (unsigned long long)u->phase_sent,
+                (unsigned long long)u->phase_timer_expirations,
+                (unsigned long long)u->phase_deadline_misses,
+                (unsigned long long)u->phase_stale_drops,
+                (unsigned long long)u->phase_parity_drops,
+                (unsigned long long)u->phase_too_late_to_arm,
+                (unsigned long long)u->phase_reanchors,
+                u->phase_min_error_ns / 1000.0,
+                u->phase_sent ? u->phase_error_sum_ns /
+                    (1000.0 * u->phase_sent) : 0.0,
+                u->phase_max_error_ns / 1000.0);
+    }
     uint64_t confirmed = atomic_load(&u->confirmed);
     uint64_t explained = u->sent + u->startup_skipped + u->skipped;
     uint64_t unaccounted = confirmed > explained ? confirmed - explained : 0;
