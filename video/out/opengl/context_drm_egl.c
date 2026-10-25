@@ -2449,7 +2449,33 @@ static void *stereo_usb_sender_thread(void *opaque)
         // we can prove that the loaded .so actually applied it. This prevents
         // misleading optical tests using an older libnvstusb from LD paths.
         const char *timer_env = getenv("NVSTUSB_EYE_TIMER_US");
-        if (timer_env && *timer_env) {
+        if (u->phase_scheduler) {
+            // Command phase is adjusted on the host only. Never let an old
+            // NVSTUSB_EYE_TIMER_US override silently influence optics.
+            if (timer_env && *timer_env) {
+                atomic_store_explicit(&u->init_status, -7, memory_order_release);
+                MP_ERR(ctx, "Stereo USB phase: unset NVSTUSB_EYE_TIMER_US; "
+                       "firmware eye timer must remain rate-derived\n");
+                goto shutdown;
+            }
+            if (!api.set_eye_timer_us || !api.effective_timer_us) {
+                atomic_store_explicit(&u->init_status, -8, memory_order_release);
+                MP_ERR(ctx, "Stereo USB phase: rebuilt libnvstusb "
+                       "eye-timer readback/setter API required\n");
+                goto shutdown;
+            }
+            int rate_timer = (int)((1000000.0 / u->refresh_hz) / 1.8);
+            int rc = api.set_eye_timer_us(dev, rate_timer);
+            if (rc || api.effective_timer_us(dev) != rate_timer) {
+                atomic_store_explicit(&u->init_status, -8, memory_order_release);
+                MP_ERR(ctx, "Stereo USB phase: failed fixing rate-derived "
+                       "firmware timer to %d us (rc=%d)\n", rate_timer, rc);
+                goto shutdown;
+            }
+            MP_INFO(ctx, "Stereo USB phase: firmware timer locked to %d us "
+                    "(%.3f Hz; arrows adjust HOST USB command time only)\n",
+                    rate_timer, u->refresh_hz);
+        } else if (timer_env && *timer_env) {
             char *end = NULL;
             errno = 0;
             long requested = strtol(timer_env, &end, 10);
@@ -2494,11 +2520,30 @@ static void *stereo_usb_sender_thread(void *opaque)
         if (u->invert_eyes)
             api.invert(dev);
     }
+    if (u->phase_scheduler) {
+        u->timer_fd = timerfd_create(CLOCK_MONOTONIC,
+                                     TFD_NONBLOCK | TFD_CLOEXEC);
+        if (u->timer_fd < 0) {
+            atomic_store_explicit(&u->init_status, -9, memory_order_release);
+            MP_ERR(ctx, "Stereo USB phase: timerfd_create failed: %s\n",
+                   mp_strerror(errno));
+            goto shutdown;
+        }
+    }
     MP_INFO(ctx, "Stereo USB: sender initialized at %.3fHz "
             "(dry_run=%d inverted=%d, confirmed KMS flip trigger, "
             "optical phase UNCALIBRATED)\n",
             u->refresh_hz, u->dry_run, u->invert_eyes);
     atomic_store_explicit(&u->init_status, 1, memory_order_release);
+    if (u->phase_scheduler) {
+        MP_INFO(ctx, "Stereo USB phase: predicted MSC/UST scheduler active "
+                "(period_ns=%lld initial_phase_us=%d; "
+                "USB timing NOT a measured IR edge)\n",
+                (long long)u->phase_period_ns,
+                atomic_load_explicit(&u->phase_us, memory_order_relaxed));
+        stereo_usb_predicted_loop(u, dev, api.send_eye);
+        goto shutdown;
+    }
 
     uint64_t last_word = 0;
     uint32_t last_msc = 0;
@@ -2671,6 +2716,10 @@ static void *stereo_usb_sender_thread(void *opaque)
     }
 
 shutdown:
+    if (u->timer_fd >= 0) {
+        close(u->timer_fd);
+        u->timer_fd = -1;
+    }
     if (dev)
         api.deinit(dev);
     if (lib)
@@ -2684,8 +2733,33 @@ bool vo_drm_stereo_usb_timer_adjust(struct ra_ctx *ctx, int delta_us)
 {
     struct priv *p = ctx->priv;
     struct stereo_usb *u = p ? &p->stereo.usb : NULL;
-    if (!u || !u->started || u->control_fd < 0 ||
-        delta_us < -5000 || delta_us > 5000 || !delta_us)
+    if (!u || !u->started || delta_us < -5000 ||
+        delta_us > 5000 || !delta_us)
+        return false;
+    if (u->phase_scheduler) {
+        if (atomic_load_explicit(&u->init_status, memory_order_acquire) != 1)
+            return false;
+        int current = atomic_load_explicit(&u->phase_us, memory_order_relaxed);
+        int desired;
+        do {
+            desired = current + delta_us;
+            if (desired < -4000 || desired > 4000)
+                return false;
+        } while (!atomic_compare_exchange_weak_explicit(
+            &u->phase_us, &current, desired, memory_order_release,
+            memory_order_relaxed));
+        atomic_fetch_add_explicit(&u->phase_adjustments, 1,
+                                  memory_order_relaxed);
+        // Not a USB packet: wakes the USB owner so it can re-arm timerfd.
+        uint64_t one = 1;
+        (void)write(u->event_fd, &one, sizeof(one));
+        MP_INFO(ctx, "Stereo USB phase control: phase_us=%d previous=%d "
+                "adjustments=%llu (host command, relative to target MSC)\n",
+                desired, current,
+                (unsigned long long)atomic_load(&u->phase_adjustments));
+        return true;
+    }
+    if (u->control_fd < 0)
         return false;
     char command[32];
     int len = snprintf(command, sizeof(command), "%+d\n", delta_us);
@@ -2716,8 +2790,43 @@ static bool stereo_usb_start(struct ra_ctx *ctx)
     struct stereo_usb *u = &p->stereo.usb;
     u->ctx = ctx;
     u->control_fd = -1;
+    u->timer_fd = -1;
+    const char *schedule = getenv("MPV_DRM_STEREO_USB_PHASE_SCHED");
+    if (schedule && strcmp(schedule, "0") != 0 &&
+        strcmp(schedule, "1") != 0) {
+        MP_ERR(ctx, "Stereo USB phase: invalid "
+               "MPV_DRM_STEREO_USB_PHASE_SCHED='%s' (0|1)\n", schedule);
+        return false;
+    }
+    u->phase_scheduler = schedule && strcmp(schedule, "1") == 0;
     u->timestamp_monotonic = drm->stereo_ust_monotonic;
     u->refresh_hz = vo_drm_get_display_fps(drm); // PHYSICAL, not logical 60 Hz.
+    if (u->phase_scheduler) {
+        if (!u->timestamp_monotonic || u->refresh_hz < 80 ||
+            u->refresh_hz > 240) {
+            MP_ERR(ctx, "Stereo USB phase: requires CLOCK_MONOTONIC "
+                   "DRM UST and 80..240Hz physical refresh\n");
+            return false;
+        }
+        u->phase_period_ns =
+            (int64_t)(1000000000.0 / u->refresh_hz + 0.5);
+    }
+    int initial_phase = -1500; // First experimental seed, not optical truth.
+    const char *phase = getenv("MPV_DRM_STEREO_USB_PHASE_US");
+    if (u->phase_scheduler && phase && *phase) {
+        char *end = NULL;
+        errno = 0;
+        long parsed = strtol(phase, &end, 10);
+        if (errno || end == phase || *end != '\0' ||
+            parsed < -4000 || parsed > 4000) {
+            MP_ERR(ctx, "Stereo USB phase: invalid initial offset '%s'; "
+                   "expected -4000..4000 us\n", phase);
+            return false;
+        }
+        initial_phase = (int)parsed;
+    }
+    atomic_init(&u->phase_us, initial_phase);
+    atomic_init(&u->phase_adjustments, 0);
     u->firmware = talloc_strdup(p, getenv("MPV_DRM_STEREO_USB_FIRMWARE")
                                    ? getenv("MPV_DRM_STEREO_USB_FIRMWARE")
                                    : "nvstusb.fw");
@@ -2744,7 +2853,10 @@ static bool stereo_usb_start(struct ra_ctx *ctx)
     atomic_init(&u->wake_errors, 0);
 
     const char *control = getenv("MPV_DRM_STEREO_USB_CONTROL");
-    if (control && strcmp(control, "1") == 0) {
+    if (u->phase_scheduler && control && strcmp(control, "1") == 0) {
+        MP_INFO(ctx, "Stereo USB phase: legacy firmware-control FIFO "
+                "disabled; keyboard directly adjusts predicted USB send time\n");
+    } else if (control && strcmp(control, "1") == 0) {
         if (u->dry_run) {
             MP_ERR(ctx, "Stereo USB: runtime eye-timer control requires "
                    "live hardware (dry-run has no firmware timing)\n");
