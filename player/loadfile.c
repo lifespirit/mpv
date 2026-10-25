@@ -1815,13 +1815,13 @@ static void play_current_file(struct MPContext *mpctx)
     // Pause media before playback while the native L/R test pair is scanned
     // continuously by the independent DRM worker. No test movie required.
     const char *calib = getenv("MPV_DRM_STEREO_CALIBRATION");
-    if (calib && strcmp(calib, "1") == 0) {
-        struct drm_opts *drm_opts =
-            mp_get_config_group(mpctx, mpctx->global, &drm_conf);
-        if (drm_opts->stereo_3d)
-            opts->pause = true;
-        talloc_free(drm_opts);
-    }
+    struct drm_opts *drm_opts =
+        mp_get_config_group(mpctx, mpctx->global, &drm_conf);
+    if (drm_opts->stereo_3d &&
+        (drm_opts->stereo_calibration == 1 ||
+         (calib && strcmp(calib, "1") == 0)))
+        opts->pause = true;
+    talloc_free(drm_opts);
 #endif
 
     mp_cancel_reset(mpctx->playback_abort);
