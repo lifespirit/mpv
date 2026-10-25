@@ -2171,6 +2171,217 @@ static void stereo_usb_confirm_flip(void *opaque, int eye, uint32_t msc,
         atomic_fetch_add_explicit(&u->wake_errors, 1, memory_order_relaxed);
 }
 
+// This experimental clock is the KMS vblank UST clock. Never mix it with
+// mp_time_ns() (which is MONOTONIC_RAW-derived in this mpv build).
+static int64_t stereo_usb_monotonic_ns(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return -1;
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+static bool stereo_usb_arm_absolute(int fd, int64_t due_ns)
+{
+    if (due_ns <= 0)
+        return false;
+    struct itimerspec it = {
+        .it_value = {
+            .tv_sec = due_ns / 1000000000LL,
+            .tv_nsec = due_ns % 1000000000LL,
+        },
+    };
+    return timerfd_settime(fd, TFD_TIMER_ABSTIME, &it, NULL) == 0;
+}
+
+// This is deliberately distinct from the old eventfd -> immediate USB path.
+// The KMS thread still only publishes one confirmed MSC/UST mailbox snapshot.
+// In the USB thread, predict a future edge and arm CLOCK_MONOTONIC timerfd.
+// No USB operations, timerfd_settime, sleeping or logging on the KMS thread.
+//
+// phase_us is signed relative to the predicted vblank. Negative values send
+// before the vblank; positive values send afterwards. The chosen firmware eye
+// timer stays at the rate-derived constant throughout calibration.
+static void stereo_usb_predicted_loop(struct stereo_usb *u, void *dev,
+                                      int (*send_eye)(void *, int))
+{
+    struct ra_ctx *ctx = u->ctx;
+    bool have_obs = false, have_sent = false, armed = false;
+    uint32_t observed_msc = 0, sent_msc = 0, target_msc = 0;
+    uint64_t last_word = 0, observed_ust_us = 0;
+    int observed_eye = -1, target_eye = -1, used_phase = 0;
+    int64_t due_ns = 0;
+    const int64_t arm_guard_ns = 100000; // 100 us
+    const int64_t max_send_late_ns = 1200000; // do not send stale eye
+
+    while (!atomic_load_explicit(&u->stop, memory_order_acquire)) {
+        struct pollfd fds[2] = {
+            {.fd = u->event_fd, .events = POLLIN},
+            {.fd = u->timer_fd, .events = POLLIN},
+        };
+        int n = poll(fds, 2, 100);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0 || ((fds[0].revents | fds[1].revents) &
+                      (POLLERR | POLLNVAL))) {
+            MP_ERR(ctx, "Stereo USB phase: event/timer poll failed\n");
+            u->usb_errors++;
+            break;
+        }
+        if (n == 0)
+            continue;
+        if (atomic_load_explicit(&u->stop, memory_order_acquire))
+            break;
+
+        if (fds[0].revents & POLLIN) {
+            uint64_t wake;
+            (void)read(u->event_fd, &wake, sizeof(wake));
+            uint64_t word = 0, ust_us = 0, seq1, seq2;
+            do {
+                seq1 = atomic_load_explicit(&u->mailbox_seq, memory_order_acquire);
+                if (seq1 & 1)
+                    continue;
+                word = atomic_load_explicit(&u->mailbox_event,
+                                             memory_order_relaxed);
+                ust_us = atomic_load_explicit(&u->mailbox_ust_us,
+                                               memory_order_relaxed);
+                seq2 = atomic_load_explicit(&u->mailbox_seq, memory_order_acquire);
+            } while ((seq1 & 1) || seq1 != seq2);
+
+            if (word && word != last_word) {
+                uint64_t payload = word - 1;
+                uint32_t msc = (uint32_t)(payload >> 1);
+                int eye = (int)(payload & 1u);
+                if (have_obs) {
+                    uint32_t diff = msc - observed_msc;
+                    if (diff > 1 && diff < 1000)
+                        u->skipped += diff - 1;
+                } else {
+                    uint64_t first = atomic_load_explicit(
+                        &u->first_confirmed_msc_plus_one, memory_order_acquire);
+                    if (first && msc - (uint32_t)(first - 1) < 100000)
+                        u->startup_skipped = msc - (uint32_t)(first - 1);
+                }
+                observed_msc = msc;
+                observed_eye = eye;
+                observed_ust_us = ust_us;
+                have_obs = true;
+                last_word = word;
+                u->phase_reanchors++;
+
+                // An earlier command whose target edge is ALREADY one or
+                // more full flips behind cannot be dispatched safely.
+                if (armed && (int32_t)(msc - target_msc) >= 1) {
+                    armed = false;
+                    u->phase_stale_drops++;
+                } else if (armed && msc == target_msc &&
+                           eye != target_eye) {
+                    armed = false;
+                    u->phase_parity_drops++;
+                }
+            }
+        }
+
+        if (fds[1].revents & POLLIN) {
+            uint64_t expirations = 0;
+            if (read(u->timer_fd, &expirations, sizeof(expirations)) ==
+                sizeof(expirations))
+                u->phase_timer_expirations += expirations;
+            if (armed) {
+                int64_t now = stereo_usb_monotonic_ns();
+                if (now < 0 || now - due_ns > max_send_late_ns ||
+                    (have_obs && (int32_t)(observed_msc - target_msc) >= 1)) {
+                    u->phase_deadline_misses++;
+                    armed = false;
+                } else {
+                    // Measure userspace CALL START relative to requested UST
+                    // edge; neither this nor return from libusb is the IR
+                    // optical transition timestamp.
+                    int64_t error_ns = now - due_ns;
+                    if (!u->phase_sent ||
+                        error_ns < u->phase_min_error_ns)
+                        u->phase_min_error_ns = error_ns;
+                    if (!u->phase_sent ||
+                        error_ns > u->phase_max_error_ns)
+                        u->phase_max_error_ns = error_ns;
+                    u->phase_error_sum_ns += error_ns;
+
+                    struct timespec begin, end;
+                    clock_gettime(CLOCK_MONOTONIC, &begin);
+                    int err = u->dry_run ? 0 : send_eye(dev, target_eye);
+                    clock_gettime(CLOCK_MONOTONIC, &end);
+                    double usb_ms = (end.tv_sec - begin.tv_sec) * 1000.0 +
+                                    (end.tv_nsec - begin.tv_nsec) / 1e6;
+                    u->max_usb_transfer_ms =
+                        MPMAX(u->max_usb_transfer_ms, usb_ms);
+                    armed = false;
+                    if (err) {
+                        u->usb_errors++;
+                        u->usb_error_code = err;
+                        MP_ERR(ctx, "Stereo USB phase: send_eye failed at "
+                                    "target MSC %u: %d\n", target_msc, err);
+                        break;
+                    }
+                    u->sent++;
+                    u->phase_sent++;
+                    sent_msc = target_msc;
+                    have_sent = true;
+                }
+            }
+        }
+
+        // The VO can change phase concurrently, but only this USB thread
+        // owns timerfd and libusb. Re-arm pending target without touching
+        // physical KMS sequencing or the fixed firmware timer.
+        int phase = atomic_load_explicit(&u->phase_us, memory_order_acquire);
+        int64_t now = stereo_usb_monotonic_ns();
+        if (now < 0)
+            continue;
+        if (armed && phase != used_phase) {
+            due_ns += (int64_t)(phase - used_phase) * 1000;
+            used_phase = phase;
+            if (due_ns > now + arm_guard_ns &&
+                stereo_usb_arm_absolute(u->timer_fd, due_ns)) {
+                u->phase_armed++;
+            } else {
+                armed = false;
+                u->phase_too_late_to_arm++;
+            }
+        }
+
+        if (!armed && have_obs) {
+            // Only one/two slots ahead of a confirmed scanout. This is NOT
+            // a free-running shutter oscillator; absent KMS notifications
+            // it will stop scheduling new USB commands.
+            for (int steps = 1; steps <= 2; steps++) {
+                uint32_t next_msc = observed_msc + (uint32_t)steps;
+                if (have_sent && (int32_t)(next_msc - sent_msc) <= 0)
+                    continue;
+                int64_t target_ns = (int64_t)observed_ust_us * 1000 +
+                    (int64_t)steps * u->phase_period_ns +
+                    (int64_t)phase * 1000;
+                if (target_ns <= now + arm_guard_ns) {
+                    u->phase_too_late_to_arm++;
+                    continue;
+                }
+                if (!stereo_usb_arm_absolute(u->timer_fd, target_ns)) {
+                    u->usb_errors++;
+                    MP_ERR(ctx, "Stereo USB phase: timerfd_settime failed: %s\n",
+                           mp_strerror(errno));
+                    break;
+                }
+                due_ns = target_ns;
+                target_msc = next_msc;
+                target_eye = observed_eye ^ (steps & 1);
+                used_phase = phase;
+                armed = true;
+                u->phase_armed++;
+                break;
+            }
+        }
+    }
+}
+
 static void *stereo_usb_sender_thread(void *opaque)
 {
     struct stereo_usb *u = opaque;
