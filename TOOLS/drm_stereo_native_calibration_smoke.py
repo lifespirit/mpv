@@ -23,9 +23,12 @@ def request(conn, request_id, command):
     buffer = b""
     while time.monotonic() < deadline:
         conn.settimeout(max(.1, deadline - time.monotonic()))
-        block = conn.recv(65536)
+        try:
+            block = conn.recv(65536)
+        except (ConnectionResetError, BrokenPipeError, socket.timeout, OSError) as exc:
+            raise RuntimeError(f"mpv disconnected its IPC client: {exc}") from exc
         if not block:
-            raise RuntimeError("mpv IPC closed")
+            raise RuntimeError("mpv closed the IPC connection unexpectedly")
         buffer += block
         while b"\n" in buffer:
             line, buffer = buffer.split(b"\n", 1)
@@ -61,6 +64,10 @@ def main():
         parser.error("video and mpv binary must exist")
 
     args.log.parent.mkdir(parents=True, exist_ok=True)
+    # mpv may fail before it has initialized VO; retain every diagnostic.
+    # Do not send both stdout and stderr to DEVNULL.
+    console_log = args.log.with_suffix(".console.log")
+    failure = None
     with tempfile.TemporaryDirectory(prefix="mpv-stereo-cal-") as tmp:
         ipc = Path(tmp) / "control.sock"
         env = os.environ.copy()
@@ -80,8 +87,10 @@ def main():
             "--drm-stereo-pacing-eye=right", "--video-sync=display-resample",
             "--no-audio", "--no-sub", f"--input-ipc-server={ipc}",
             f"--log-file={args.log.resolve()}", str(args.video.resolve())]
-        process = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with console_log.open("wb") as console:
+            process = subprocess.Popen(
+                cmd, env=env, stdin=subprocess.DEVNULL,
+                stdout=console, stderr=subprocess.STDOUT)
         try:
             wait_socket(ipc, process)
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
@@ -100,10 +109,18 @@ def main():
                     try:
                         if call("get_property", "video-out-params"):
                             break
-                    except RuntimeError:
-                        pass
+                    except RuntimeError as exc:
+                        # A property may be unavailable until first VO
+                        # reconfiguration. An IPC disconnect is NOT transient.
+                        if "property unavailable" not in str(exc).lower():
+                            raise
+                    rc = process.poll()
+                    if rc is not None:
+                        raise RuntimeError(
+                            f"mpv exited before VIDEO_RECONFIG (returncode={rc})")
                     if time.monotonic() >= until:
-                        raise TimeoutError("video output was not configured")
+                        raise TimeoutError(
+                            "video output was not configured within 15s")
                     time.sleep(.1)
                 if call("get_property", "pause") is not True:
                     raise AssertionError("startup calibration did not pause media")
@@ -130,6 +147,8 @@ def main():
                 # mpv may close the IPC socket before acknowledging quit.
                 conn.sendall(json.dumps({"command": ["quit"]}).encode() + b"\n")
             process.wait(timeout=12)
+        except Exception as exc:
+            failure = f"{type(exc).__name__}: {exc}"
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -143,6 +162,8 @@ def main():
     kms = re.findall(r"Stereo DRM final:[^\n]*", content)
     usb = re.findall(r"Stereo USB final:[^\n]*", content)
     errors = []
+    if failure:
+        errors.append(f"smoke test: {failure}")
     if process.returncode != 0:
         errors.append(f"mpv exit code {process.returncode}")
     if not kms or not usb:
@@ -163,7 +184,17 @@ def main():
         print("FAIL:", e)
     if not errors:
         print("PASS: native calibration state transitions and software transport")
-    print("Log:", args.log)
+    print("mpv log:", args.log)
+    print("mpv console:", console_log)
+    if errors:
+        for diagnostic in (args.log, console_log):
+            print(f"--- {diagnostic}: last 65 lines ---")
+            if diagnostic.exists():
+                lines = diagnostic.read_text(errors="replace").splitlines()
+                for line in lines[-65:]:
+                    print(line)
+            else:
+                print("(not created)")
     print("Optical timing NOT measured; real USB timer adjustment NOT exercised.")
     return int(bool(errors))
 
