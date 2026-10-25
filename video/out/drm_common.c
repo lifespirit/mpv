@@ -596,6 +596,8 @@ const struct m_sub_options drm_conf = {
         {"drm-vrr-enabled", OPT_CHOICE(vrr_enabled,
             {"no", 0}, {"yes", 1}, {"auto", -1})},
         {"drm-stereo-3d", OPT_BOOL(stereo_3d)},
+        {"drm-stereo-calibration", OPT_CHOICE(stereo_calibration,
+            {"off", 0}, {"before-play", 1}, {"manual", 2})},
         {"drm-stereo-pacing-eye", OPT_CHOICE(stereo_pacing_eye,
             {"left", 0}, {"right", 1})},
         {"drm-stereo-stats", OPT_BOOL(stereo_stats)},
