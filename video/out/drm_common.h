@@ -112,6 +112,8 @@ struct drm_opts {
     // Half-SBS active-shutter experiment: mpv sees one logical refresh
     // per completed L/R cycle while DRM keeps the physical mode unchanged.
     bool stereo_3d;
+    // 0=off, 1=calibration screen before film, 2=manual hotkeys only.
+    int stereo_calibration;
     // Which physical eye callback drives the logical 60Hz mpv clock.
     // 0 = L (normal), 1 = R (experimental half-cycle phase shift).
     int stereo_pacing_eye;
