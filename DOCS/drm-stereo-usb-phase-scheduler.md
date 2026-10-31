@@ -238,6 +238,45 @@ Neither test can prove optical correction. They test only integration
 and deadline arithmetic; observing the height ruler through the real
 shutters (ideally with a camera) remains necessary.
 
+## Truly quiet USB worker test (phase-ramp A/B)
+
+Setting `--msg-level=vo/gpu/opengl=warn` does **not** stop mpv's
+`--log-file` from retaining INFO messages. In particular, previous
+tests showed `Stereo USB drift sample` every 30 seconds even when that
+option was present. It is not a reliable way to measure the effect of
+synchronous logging performed in the USB sender thread.
+
+Use this new opt-in environment switch instead:
+
+```sh
+export MPV_DRM_STEREO_USB_WORKER_LOG=0
+export MPV_DRM_STEREO_USB_EVENT_TRACE=0
+```
+
+This disables the *calls themselves* to the USB worker's startup
+`MP_INFO`, 30-second `Stereo USB drift sample`, phase-clamp
+`MP_WARN` and opt-in exceptional-event log. Essential failure/error
+logging is preserved. The phase clamp is **still active** and the
+end-of-run `Stereo USB drift final`/`Stereo USB scheduler final`
+counters are unaffected. A single setup-time message announces quiet
+mode before the worker starts.
+
+Other modules (including the normal-priority asynchronous DRM stats
+logger) may still write to `--log-file`: the switch is intentionally
+limited to the USB timing-critical thread. Reset with
+`MPV_DRM_STEREO_USB_WORKER_LOG=1` or unset the variable for previous
+behavior.
+
+```sh
+# Verify after stopping mpv:
+grep -E 'Stereo USB (drift sample|event:|drift final|scheduler final)' \
+    /tmp/mpv-stereo-phase.log
+```
+
+Expect no drift samples or event lines and the final counters to
+remain. The optical fault after the ±4000us clamp must still be
+distinguished from hypothetical rare USB deadline failures.
+
 ## Timestamped exceptional USB events
 
 On `feature/drm-stereo-usb-phase-event-trace` (built on the phase-ramp
