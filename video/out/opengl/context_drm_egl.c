@@ -3085,6 +3085,20 @@ static void stereo_usb_stop(struct ra_ctx *ctx)
             (unsigned long long)u->control_updates,
             (unsigned long long)u->control_errors,
             u->final_eye_timer_us);
+    if (u->phase_scheduler && u->phase_ramp_rate_ns_per_s) {
+        MP_INFO(ctx, "Stereo USB drift final: "
+                "rate_us_per_s=%+.3f elapsed_s=%.1f "
+                "manual_phase_us=%d correction_us=%+.3f "
+                "effective_phase_us=%+.3f limit_entries=%llu "
+                "clamped=%d (host deadlines, NOT measured IR)\n",
+                u->phase_ramp_rate_ns_per_s / 1000.0,
+                u->phase_ramp_elapsed_ns / 1e9,
+                atomic_load(&u->phase_us),
+                u->phase_ramp_correction_ns / 1000.0,
+                u->phase_ramp_effective_ns / 1000.0,
+                (unsigned long long)u->phase_ramp_limit_entries,
+                u->phase_ramp_clamped);
+    }
     if (u->phase_scheduler) {
         MP_INFO(ctx, "Stereo USB scheduler final: mode=predicted "
                 "phase_us=%d fixed_eye_timer_us=%d "
