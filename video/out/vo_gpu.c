@@ -91,10 +91,11 @@ static void resize(struct vo *vo)
 }
 
 #if HAVE_DRM
-// The calibration pair is rendered only once. Put an identical ruler into
-// BOTH eyes' GBM buffers, so the ruler itself never flickers or contributes
-// to the black/white optical leakage boundary under test. It is not OSD and
-// does not run on the KMS or USB scheduling threads.
+// The calibration pair is rendered only once. The ruler is complementary:
+// the white test eye has a black scale with white ticks, and the black test
+// eye a white scale with black ticks. This makes the scanout leakage
+// boundary visible in the scale as well as in the adjacent test field.
+// It is not OSD and does not run on the KMS or USB scheduling threads.
 //
 // All positions below use top-left image coordinates. The ra_gl clear
 // scissor uses bottom-left coordinates, so invert Y explicitly.
@@ -156,7 +157,8 @@ static void stereo_ruler_text(struct ra *ra, struct ra_tex *tex,
 }
 
 static void stereo_calibration_draw_ruler(struct ra_ctx *ctx,
-                                          struct ra_tex *tex)
+                                          struct ra_tex *tex,
+                                          bool white_eye)
 {
     const int w = tex->params.w, h = tex->params.h;
     // Ruler is on for synthetic calibration by default. Allow an A/B
@@ -172,11 +174,19 @@ static void stereo_calibration_draw_ruler(struct ra_ctx *ctx,
     const int left = w - strip;
     const int tick_x = left + 14;
     const int text_x = left + (scale == 4 ? 57 : 43);
-    float bg[4] = {0.04f, 0.04f, 0.04f, 1.0f};
-    float edge[4] = {0.35f, 0.35f, 0.35f, 1.0f};
-    float faint[4] = {0.36f, 0.36f, 0.36f, 1.0f};
-    float medium[4] = {0.65f, 0.65f, 0.65f, 1.0f};
-    float bright[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    // Complementary high-contrast ruler for the two eye buffers.
+    // White test eye: black background / white marks.
+    // Black test eye: white background / black marks.
+    const float bg_value = white_eye ? 0.0f : 1.0f;
+    const float edge_value = white_eye ? 0.20f : 0.80f;
+    const float faint_value = white_eye ? 0.55f : 0.45f;
+    const float medium_value = white_eye ? 0.78f : 0.22f;
+    const float bright_value = white_eye ? 1.0f : 0.0f;
+    float bg[4] = {bg_value, bg_value, bg_value, 1.0f};
+    float edge[4] = {edge_value, edge_value, edge_value, 1.0f};
+    float faint[4] = {faint_value, faint_value, faint_value, 1.0f};
+    float medium[4] = {medium_value, medium_value, medium_value, 1.0f};
+    float bright[4] = {bright_value, bright_value, bright_value, 1.0f};
 
     struct ra *ra = ctx->ra;
     stereo_ruler_rect(ra, tex, bg, left, 0, w, h);
@@ -240,9 +250,9 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
                     .y1 = fbo.tex->params.h,
                 };
                 p->ctx->ra->fns->clear(p->ctx->ra, fbo.tex, color, &full);
-                // Include the identical measurement ruler in both eyes,
-                // keeping calibration content fixed for KMS repetition.
-                stereo_calibration_draw_ruler(p->ctx, fbo.tex);
+                // Complementary scales follow each eye's calibration field.
+                // The pair remains fixed for repeated KMS scanouts.
+                stereo_calibration_draw_ruler(p->ctx, fbo.tex, white);
                 vo->drm->stereo_draw_eye = eye;
                 ++vo->drm->stereo_draws;
                 vo_drm_stereo_pair_note_eye_render(p->ctx, eye, 0);
