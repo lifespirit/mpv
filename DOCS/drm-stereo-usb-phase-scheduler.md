@@ -213,6 +213,50 @@ Neither test can prove optical correction. They test only integration
 and deadline arithmetic; observing the height ruler through the real
 shutters (ideally with a camera) remains necessary.
 
+## Timestamped exceptional USB events
+
+On `feature/drm-stereo-usb-phase-event-trace` (built on the phase-ramp
+branch), enable diagnostic logging for exceptional USB-worker events:
+
+```sh
+export MPV_DRM_STEREO_USB_EVENT_TRACE=1
+```
+
+This emits `Stereo USB event:` lines with `elapsed_s`, a reason, target
+and last observed MSC, intended target eye, and
+`host_now_minus_deadline_us`. Event types:
+
+- `mailbox_msc_skip` — sender did not consume every confirmed MSC
+  (may represent a slow USB worker, not necessarily a DRM missed flip).
+- `late_dispatch`, `obsolete_target` — armed timer expired too late
+  or after its target slot passed.
+- `stale_target`, `target_eye_mismatch` — event mailbox invalidated
+  an armed target.
+- `target_too_late_to_arm`, `manual_rearm_too_late` — target deadline
+  already too close to or past the usable arm window.
+- `slow_send_eye` — a single synchronous USB invocation lasted at
+  least 2ms; this could disturb subsequent sends.
+
+Only the **USB sender thread** logs these rare exceptional events;
+the KMS flip callback is unchanged. The logging itself can slightly
+increase rare-event latency, so compare results against the
+`MPV_DRM_STEREO_USB_EVENT_TRACE=0` baseline. It is disabled by
+default, and neither the algorithm nor eye parity is changed.
+
+Compare event `elapsed_s` values with wallclock observations such
+as a sudden optical inversion at 459 seconds. The underlying optics
+are not timestamped by the host, so matching timestamps are
+correlation rather than proof that an event caused a shutter
+resynchronization.
+
+```sh
+grep 'Stereo USB event:' /tmp/mpv-stereo-phase.log
+```
+
+If no event appears near the inversion, it strengthens the case for
+a transmitter/IR/glasses phase mechanism beyond the host's
+observable KMS/USB dispatch failures.
+
 ## Diagnostics and first test (do not use glasses for dry-run)
 
 ```bash
