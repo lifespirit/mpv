@@ -84,23 +84,23 @@ bottom). Small ticks are 1% apart, medium ticks 5% apart, and bright
 numbered ticks are 10% apart. The sidebar is 150 pixels wide at
 2560x1440.
 
-The ruler is deliberately **complementary between the eye buffers**:
-the white calibration eye gets a black ruler with white tick marks and
-labels; the black calibration eye gets a white ruler with black tick
-marks and labels. The ruler follows the actual calibration pattern,
-including the 1/2 eye-swap controls and the both-white/both-black
-patterns. Its opposite-contrast areas can make optical cross-talk
-and phase boundary motion easier to compare.
+In the black/white calibration modes (keys 1 and 2), the ruler is
+**complementary between the eye buffers**: the white test eye gets a
+black ruler with white tick marks and labels, while the black test
+eye gets a white ruler with black tick marks and labels. The two
+opposite-contrast versions reveal optical cross-talk and phase drift.
+
+In the stereo depth-ladder mode (key 3), the right-edge ruler is drawn
+**identically in both eye buffers** (dark backing, white ticks): its
+disparity is zero and it stays on the screen plane while the steps
+have controlled binocular parallax. No ruler is present in movie frames.
 
 The left/right buffers are drawn once per pattern, then KMS repeats
-the same pair. No scale is present in movie frames, and no per-vblank
-ruler rendering occurs. Because the ruler now alternates between
-opposite-contrast fields, it is itself sensitive to eye cross-talk,
-rather than acting as a common binocular reference.
+the same pair. No per-vblank ruler or scene rendering occurs.
 
-To compare against a completely unchanged all-white/all-black
-calibration screen, use `MPV_DRM_STEREO_CALIBRATION_RULER=0`.
-The scale is enabled by default in this branch.
+To compare against the unadorned white/black test fields, use
+`MPV_DRM_STEREO_CALIBRATION_RULER=0`. The switch also hides the ruler
+in depth-ladder mode. The scale is enabled by default.
 
 To measure drift, hold the white/black image for 3-5 minutes without
 adjusting the phase arrows. Note where the **moving boundary in the
@@ -114,11 +114,36 @@ mistaking LCD response / shutter cross-talk for a timing change.
 - RIGHT: +100 us command phase (later).
 - UP: +25 us command phase (later).
 - DOWN: -25 us command phase (earlier).
-- 1/2: L-white/R-black or L-black/R-white.
-- 3/4: both white / both black.
+- 1: L-white/R-black (complementary ruler).
+- 2: L-black/R-white (complementary ruler).
+- 3: stationary stereo depth ladder (common screen-plane ruler).
+- 4: no calibration binding; removed both-white and both-black modes.
 - Enter / Esc: leave the test screen and play the film.
 - `c` during film: enable/disable live phase adjustment.
 - `C` during film: enter/exit calibration screen while retaining KMS cadence.
+
+### Stereo depth ladder (key 3)
+
+Pattern 2 (the `3` key or JSON IPC `stereo-calibrate pattern 2`)
+renders a stationary seven-step ladder in both calibration eye buffers.
+On a 2560x1440 display, the separation changes in 16-pixel
+increments from -48px (top, behind the screen), through 0px (middle,
+at the screen plane), to +48px (bottom, in front of the screen).
+Positive disparity uses crossed parallax: each left-eye shape is
+shifted right relative to the corresponding right-eye shape.
+
+The neutral-dark scene includes screen-plane guide lines, seven
+contrasting rectangular steps numbered 0 through 6, and the same
+right-edge height ruler fixed at zero disparity. At the default
+1440px height, the steps are distributed across the display, with
+lower steps useful for detecting partial-frame shutter problems.
+
+The geometry is generated entirely in the normal VO/GPU path when
+the pattern is captured. It does not modify the 120Hz physical
+alternation, the USB sender, phase-ramp compensation, or movie PTS.
+Use keys 1/2 for *precise optical phase drift measurement* and 3 for
+*stereo depth, inversion, ghosting, and regional image quality*.
+All seven steps are static to avoid introducing motion as a variable.
 
 Initial `MPV_DRM_STEREO_USB_PHASE_US` defaults to -1500. Accepted phase
 range is -4000 to +4000 us. Adjustments take effect in the USB scheduler,
