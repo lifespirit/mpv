@@ -238,6 +238,53 @@ Neither test can prove optical correction. They test only integration
 and deadline arithmetic; observing the height ruler through the real
 shutters (ideally with a camera) remains necessary.
 
+## Fixed SET_EYE timer diagnostic with predicted-MSC scheduler
+
+The native `MPV_DRM_STEREO_USB_PHASE_SCHED=1` path deliberately
+overrides `NVSTUSB_EYE_TIMER_US` with the rate-derived value (4629us
+at approximately 120Hz). **Simply setting NVSTUSB_EYE_TIMER_US does
+not work** with this scheduler. To compare *constant* firmware command
+timer values while leaving host USB deadline scheduling unchanged, an
+explicit opt-in is now available:
+
+```sh
+export MPV_DRM_STEREO_USB_FIXED_EYE_TIMER_TEST=1
+export NVSTUSB_EYE_TIMER_US=4129   # repeat with 4629, then 5129
+unset NVSTUSB_EYE_TIMER_RAMP_US_PER_S
+export MPV_DRM_STEREO_USB_PHASE_SCHED=1
+export MPV_DRM_STEREO_USB_PHASE_US=0
+export MPV_DRM_STEREO_USB_DRIFT_US_PER_S=0
+export NVSTUSB_FRAME_TIMER_EXACT=1
+export NVSTUSB_FRAME_TIMER_TICK_BIAS=0
+```
+
+**Remove `-u NVSTUSB_EYE_TIMER_US` from any `env` launcher** or
+the requested value will be silently cleared before mpv starts.
+
+The opt-in is only active if the fixed timer variable is set, requires
+a rebuilt `libnvstusb` with setter/readback support, verifies the
+timer value after applying it, and refuses out-of-range values
+outside +/-500us of the baseline (or the firmware-safe
+500us..frame_us-500us interval). Unset or exactly `0` is required for
+`NVSTUSB_EYE_TIMER_RAMP_US_PER_S` in a fixed timer test. All other
+host and firmware timer parameters remain unaffected.
+
+The mpv log prints
+`Stereo USB phase: DIAGNOSTIC fixed SET_EYE timer=4129 us (baseline=4629 us, delta=-500 us ...)`
+when the override is verified; libnvstusb also writes
+`nvstusb: runtime eye command timer=4129 us` to stderr.
+`Stereo USB scheduler final` will report `fixed_eye_timer_us=4129`.
+
+Suggested A/B/B/A comparison: 4629 (control), 4129, 5129, 4629
+to check run-to-run variability and initial receiver phase. Record
+the 0% marker disappearance time and boundary movement direction.
+A static command timer offset may change the shutter OPEN window,
+not necessarily fix accumulated phase drift. Do not conclude that
+a longer-lived marker means permanently stable stereo.
+
+No changes are made to `nvstusb.fw`, the KMS scanout path, USB
+send deadlines or the firmware's frame reload register at 0x201b.
+
 ## Truly quiet USB worker test (phase-ramp A/B)
 
 Setting `--msg-level=vo/gpu/opengl=warn` does **not** stop mpv's
