@@ -2219,7 +2219,8 @@ static void stereo_usb_predicted_loop(struct stereo_usb *u, void *dev,
     uint32_t observed_msc = 0, sent_msc = 0, target_msc = 0;
     uint64_t last_word = 0, observed_ust_us = 0;
     int observed_eye = -1, target_eye = -1, used_phase = 0;
-    int64_t due_ns = 0;
+    int64_t due_ns = 0, used_effective_phase_ns = 0;
+    int64_t next_ramp_report_ns = 0;
     const int64_t arm_guard_ns = 100000; // 100 us
     const int64_t max_send_late_ns = 1200000; // do not send stale eye
 
@@ -2270,6 +2271,17 @@ static void stereo_usb_predicted_loop(struct stereo_usb *u, void *dev,
                         &u->first_confirmed_msc_plus_one, memory_order_acquire);
                     if (first && msc - (uint32_t)(first - 1) < 100000)
                         u->startup_skipped = msc - (uint32_t)(first - 1);
+                    // Start drift integration from FIRST confirmed physical
+                    // KMS flip, using the same CLOCK_MONOTONIC UST basis as
+                    // predicted USB deadlines (not mp_time_ns/RAW).
+                    if (u->phase_ramp_rate_ns_per_s) {
+                        u->phase_ramp_start_ns = (int64_t)ust_us * 1000;
+                        next_ramp_report_ns =
+                            u->phase_ramp_start_ns + 30000000000LL;
+                        MP_INFO(ctx, "Stereo USB drift: started at "
+                                "confirmed MSC=%u (UST CLOCK_MONOTONIC)\n",
+                                msc);
+                    }
                 }
                 observed_msc = msc;
                 observed_eye = eye;
@@ -2346,8 +2358,43 @@ static void stereo_usb_predicted_loop(struct stereo_usb *u, void *dev,
         int64_t now = stereo_usb_monotonic_ns();
         if (now < 0)
             continue;
+        int64_t elapsed_ns = u->phase_ramp_start_ns > 0 &&
+                             now > u->phase_ramp_start_ns ?
+                             now - u->phase_ramp_start_ns : 0;
+        bool phase_clamped = false;
+        int64_t effective_phase_ns = stereo_usb_effective_phase_ns(
+            phase, elapsed_ns, u->phase_ramp_rate_ns_per_s, &phase_clamped);
+        u->phase_ramp_elapsed_ns = elapsed_ns;
+        u->phase_ramp_correction_ns = stereo_usb_phase_ramp_ns(
+            elapsed_ns, u->phase_ramp_rate_ns_per_s);
+        u->phase_ramp_effective_ns = effective_phase_ns;
+        if (phase_clamped && !u->phase_ramp_clamped) {
+            u->phase_ramp_limit_entries++;
+            MP_WARN(ctx, "Stereo USB drift: effective phase reached "
+                    "+/-4000 us limit after %.1fs; ramp is clamped. "
+                    "Stop the test and restart with a safer initial phase.\n",
+                    elapsed_ns / 1e9);
+        }
+        u->phase_ramp_clamped = phase_clamped;
+        if (u->phase_ramp_rate_ns_per_s && next_ramp_report_ns > 0 &&
+            now >= next_ramp_report_ns) {
+            MP_INFO(ctx, "Stereo USB drift sample: elapsed_s=%.1f "
+                    "rate_us_per_s=%+.3f manual_phase_us=%d "
+                    "correction_us=%+.3f effective_phase_us=%+.3f "
+                    "clamped=%d\n",
+                    elapsed_ns / 1e9,
+                    u->phase_ramp_rate_ns_per_s / 1000.0, phase,
+                    u->phase_ramp_correction_ns / 1000.0,
+                    effective_phase_ns / 1000.0, phase_clamped);
+            next_ramp_report_ns = now + 30000000000LL;
+        }
         if (armed && phase != used_phase) {
-            due_ns += (int64_t)(phase - used_phase) * 1000;
+            // A manual arrow press changes only the base offset; apply
+            // its net effect to an already armed timer. Ordinary ramp
+            // increments are applied on every NEXT MSC deadline, avoiding
+            // pointless timerfd re-arming for sub-nanosecond drift/frame.
+            due_ns += effective_phase_ns - used_effective_phase_ns;
+            used_effective_phase_ns = effective_phase_ns;
             used_phase = phase;
             if (due_ns > now + arm_guard_ns &&
                 stereo_usb_arm_absolute(u->timer_fd, due_ns)) {
@@ -2369,7 +2416,7 @@ static void stereo_usb_predicted_loop(struct stereo_usb *u, void *dev,
                     continue;
                 int64_t target_ns = (int64_t)observed_ust_us * 1000 +
                     (int64_t)steps * u->phase_period_ns +
-                    (int64_t)phase * 1000;
+                    effective_phase_ns;
                 if (target_ns <= now + arm_guard_ns) {
                     u->phase_too_late_to_arm++;
                     continue;
@@ -2385,6 +2432,7 @@ static void stereo_usb_predicted_loop(struct stereo_usb *u, void *dev,
                 target_msc = next_msc;
                 target_eye = observed_eye ^ (steps & 1);
                 used_phase = phase;
+                used_effective_phase_ns = effective_phase_ns;
                 armed = true;
                 u->phase_armed++;
                 break;
