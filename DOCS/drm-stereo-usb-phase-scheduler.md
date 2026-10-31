@@ -76,6 +76,31 @@ control the command phase directly.
 In before-play mode, the generated L-white/R-black image is held while
 the **physical** KMS/USB eye alternation keeps running.
 
+### Optical drift measurement ruler
+
+This experimental branch adds a persistent **right-edge 0–100% height
+ruler** to the synthetic calibration screen (0% at the top, 100% at the
+bottom). Small ticks are 1% apart, medium ticks 5% apart, and bright
+numbered ticks are 10% apart. The sidebar is 150 pixels wide at
+2560x1440, with a dark backing and high-contrast white numbers.
+
+The raster is rendered **identically in both eye GBM buffers** when the
+calibration image is first captured. It therefore provides a stationary
+monocular reference adjacent to the white/black optical boundary,
+instead of introducing a second eye-dependent leakage artifact.
+No scale is present in movie frames, and no per-vblank rendering occurs.
+
+To compare against a completely unchanged all-white/all-black
+calibration screen, use `MPV_DRM_STEREO_CALIBRATION_RULER=0`.
+The scale is enabled by default in this branch.
+
+To measure drift, hold the white/black image for 3-5 minutes without
+adjusting the phase arrows. Note where the **moving boundary in the
+main image** crosses the numbered scale after 0, 60, 120, 180 and 240
+seconds. The scale itself is drawn into BOTH eyes, so its white tick
+marks are not an optical-phase indicator; measure the adjacent field.
+
+
 - LEFT: -100 us command phase (earlier).
 - RIGHT: +100 us command phase (later).
 - UP: +25 us command phase (later).
