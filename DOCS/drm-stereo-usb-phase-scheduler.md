@@ -155,8 +155,10 @@ For the first controlled A/B study, keep everything else unchanged,
 including the same firmware, USB port, display mode, `--no-config`,
 `--drm-stereo-calibration=before-play`, the `L-white/R-black` pattern,
 `MPV_DRM_STEREO_USB_PHASE_US=-1500`, and an **unset**
-`NVSTUSB_EYE_TIMER_US`. Use **three independent launches** of the same
-3-minute stationary calibration pattern:
+`NVSTUSB_EYE_TIMER_US`. In particular, reset the earlier Timer 2
+experiment to `NVSTUSB_FRAME_TIMER_EXACT=1` and
+`NVSTUSB_FRAME_TIMER_TICK_BIAS=0` for **all three runs**. Use three
+independent launches of the same 3-minute stationary calibration pattern:
 
 - A: `MPV_DRM_STEREO_USB_DRIFT_US_PER_S=0`
 - B: `MPV_DRM_STEREO_USB_DRIFT_US_PER_S=+7`
