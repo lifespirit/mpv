@@ -7553,7 +7553,6 @@ static void stereo_calibration_update_keys(struct MPContext *mpctx)
         "1 stereo-calibrate pattern 0\n"
         "2 stereo-calibrate pattern 1\n"
         "3 stereo-calibrate pattern 2\n"
-        "4 stereo-calibrate pattern 3\n"
         "ENTER stereo-calibrate accept\n"
         "ESC stereo-calibrate accept\n"
         "C stereo-calibrate screen\n";
@@ -7641,7 +7640,7 @@ static void cmd_stereo_calibrate(void *p)
             ctx->stereo_calibration_screen = true;
             ctx->stereo_calibration_tune = false;
             set_osd_msg(mpctx, 1, 2200,
-                        "3D calibration: arrows=%s, 1..4=pattern, Enter=play",
+                        "3D calibration: arrows=%s, 1/2=BW eyes, 3=depth ladder, Enter=play",
                         phase_mode ? "USB command phase" : "firmware timer");
         } else if (ctx->stereo_calibration_screen) {
             int movie = -1;
@@ -7660,7 +7659,7 @@ static void cmd_stereo_calibrate(void *p)
         }
         stereo_calibration_update_keys(mpctx);
     } else if (strcmp(action, "pattern") == 0) {
-        if (!ctx->stereo_calibration_screen || value < 0 || value > 3) {
+        if (!ctx->stereo_calibration_screen || value < 0 || value > 2) {
             cmd->success = false;
             return;
         }
