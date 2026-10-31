@@ -2585,13 +2585,13 @@ static void *stereo_usb_sender_thread(void *opaque)
                 MP_ERR(ctx, "Stereo USB phase: unset NVSTUSB_EYE_TIMER_US "
                        "or explicitly set "
                        "MPV_DRM_STEREO_USB_FIXED_EYE_TIMER_TEST=1 "
-                       "for a bounded fixed-r experiment\\n");
+                       "for a bounded fixed-r experiment\n");
                 goto shutdown;
             }
             if (!api.set_eye_timer_us || !api.effective_timer_us) {
                 atomic_store_explicit(&u->init_status, -8, memory_order_release);
                 MP_ERR(ctx, "Stereo USB phase: rebuilt libnvstusb "
-                       "eye-timer readback/setter API required\\n");
+                       "eye-timer readback/setter API required\n");
                 goto shutdown;
             }
             int rate_timer = (int)((1000000.0 / u->refresh_hz) / 1.8);
@@ -2604,14 +2604,14 @@ static void *stereo_usb_sender_thread(void *opaque)
                 // Keep static test within +/-500us of the proven
                 // operating baseline; the firmware range is wider, but
                 // that would make optical comparisons unnecessarily risky.
-                if (errno || end == timer_env || *end != '\\0' ||
+                if (errno || end == timer_env || *end != '\0' ||
                     requested < 500 || requested > frame_us - 500 ||
                     requested < rate_timer - 500 ||
                     requested > rate_timer + 500) {
                     atomic_store_explicit(&u->init_status, -7,
                                           memory_order_release);
                     MP_ERR(ctx, "Stereo USB fixed-r test: invalid timer '%s' "
-                           "(allowed baseline %d +/-500us, also 500..%d)\\n",
+                           "(allowed baseline %d +/-500us, also 500..%d)\n",
                            timer_env, rate_timer, frame_us - 500);
                     goto shutdown;
                 }
@@ -2624,7 +2624,7 @@ static void *stereo_usb_sender_thread(void *opaque)
                                           memory_order_release);
                     MP_ERR(ctx, "Stereo USB fixed-r test: set "
                            "NVSTUSB_EYE_TIMER_RAMP_US_PER_S=0 "
-                           "or unset it (got '%s')\\n", ramp_env);
+                           "or unset it (got '%s')\n", ramp_env);
                     goto shutdown;
                 }
                 test_timer = (int)requested;
@@ -2633,18 +2633,18 @@ static void *stereo_usb_sender_thread(void *opaque)
             if (rc || api.effective_timer_us(dev) != test_timer) {
                 atomic_store_explicit(&u->init_status, -8, memory_order_release);
                 MP_ERR(ctx, "Stereo USB phase: firmware command timer "
-                       "readback mismatch at %d us (rc=%d)\\n",
+                       "readback mismatch at %d us (rc=%d)\n",
                        test_timer, rc);
                 goto shutdown;
             }
             if (timer_env && *timer_env) {
                 MP_WARN(ctx, "Stereo USB phase: DIAGNOSTIC fixed SET_EYE "
                         "timer=%d us (baseline=%d us, delta=%+d us; "
-                        "host MSC scheduling UNCHANGED; lens phase unknown)\\n",
+                        "host MSC scheduling UNCHANGED; lens phase unknown)\n",
                         test_timer, rate_timer, test_timer - rate_timer);
             } else {
                 MP_INFO(ctx, "Stereo USB phase: firmware timer locked to %d us "
-                        "(%.3f Hz; arrows adjust HOST USB command time only)\\n",
+                        "(%.3f Hz; arrows adjust HOST USB command time only)\n",
                         rate_timer, u->refresh_hz);
             }
         } else if (timer_env && *timer_env) {
