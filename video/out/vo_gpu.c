@@ -159,7 +159,10 @@ static void stereo_calibration_draw_ruler(struct ra_ctx *ctx,
                                           struct ra_tex *tex)
 {
     const int w = tex->params.w, h = tex->params.h;
-    if (w < 320 || h < 240)
+    // Ruler is on for synthetic calibration by default. Allow an A/B
+    // comparison with the exact legacy blank calibration buffers.
+    const char *ruler = getenv("MPV_DRM_STEREO_CALIBRATION_RULER");
+    if ((ruler && strcmp(ruler, "0") == 0) || w < 320 || h < 240)
         return;
 
     // On 2560x1440: a 150 px strip at the right, every 1% tick,
