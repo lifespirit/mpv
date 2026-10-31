@@ -7,6 +7,7 @@ measure optical phase. Do not wear shutter glasses for unverified testing.
 """
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -61,7 +62,13 @@ def main():
                         default=Path("/tmp/mpv-stereo-native-calibration-smoke.log"))
     parser.add_argument("--phase-scheduler", action="store_true",
                         help="Exercise predicted MSC/UST timerfd USB dry-run")
+    parser.add_argument("--drift-us-per-s", type=float, default=0.0,
+                        help="Exercise signed host phase ramp in predicted dry-run")
     args = parser.parse_args()
+    if not math.isfinite(args.drift_us_per_s) or abs(args.drift_us_per_s) > 20:
+        parser.error("--drift-us-per-s must be finite and within -20..+20")
+    if args.drift_us_per_s and not args.phase_scheduler:
+        parser.error("--drift-us-per-s requires --phase-scheduler")
     if not args.video.is_file() or not args.mpv.is_file():
         parser.error("video and mpv binary must exist")
 
@@ -77,7 +84,8 @@ def main():
                      "MPV_DRM_STEREO_USB", "MPV_DRM_STEREO_USB_CONTROL",
                      "MPV_DRM_STEREO_USB_DRY_RUN", "NVSTUSB_EYE_TIMER_US",
                      "MPV_DRM_STEREO_USB_PHASE_SCHED",
-                     "MPV_DRM_STEREO_USB_PHASE_US"):
+                     "MPV_DRM_STEREO_USB_PHASE_US",
+                     "MPV_DRM_STEREO_USB_DRIFT_US_PER_S"):
             env.pop(name, None)
         env.pop("MPV_DRM_STEREO_CALIBRATION", None)
         env["MPV_DRM_STEREO_USB"] = "1"
@@ -85,6 +93,8 @@ def main():
         if args.phase_scheduler:
             env["MPV_DRM_STEREO_USB_PHASE_SCHED"] = "1"
             env["MPV_DRM_STEREO_USB_PHASE_US"] = "-1500"
+            if args.drift_us_per_s:
+                env["MPV_DRM_STEREO_USB_DRIFT_US_PER_S"] = str(args.drift_us_per_s)
         cmd = [
             str(args.mpv.resolve()), "--no-config", "--terminal=no",
             "--input-terminal=no", "--vo=gpu", "--gpu-context=drm",
@@ -227,6 +237,23 @@ def main():
                     errors.append(f"predicted USB {key}: below {minimum}/missing")
             if not re.search(r"\bphase_us=-1500\b", final):
                 errors.append("phase did not return to original -1500 us")
+        if args.drift_us_per_s:
+            ramps = re.findall(r"Stereo USB drift final:[^\n]*", content)
+            if not ramps:
+                errors.append("missing final host phase ramp telemetry")
+            else:
+                rate = re.search(r"\brate_us_per_s=([+-]?[0-9.]+)", ramps[-1])
+                elapsed = re.search(r"\belapsed_s=([0-9.]+)", ramps[-1])
+                correction = re.search(
+                    r"\bcorrection_us=([+-]?[0-9.]+)", ramps[-1])
+                if not rate or abs(float(rate.group(1)) -
+                                   args.drift_us_per_s) > .001:
+                    errors.append("incorrect applied host phase ramp rate")
+                if not elapsed or float(elapsed.group(1)) <= 0:
+                    errors.append("host phase ramp did not advance in time")
+                if not correction or (
+                    float(correction.group(1)) * args.drift_us_per_s <= 0):
+                    errors.append("host phase ramp correction did not grow")
     for e in errors:
         print("FAIL:", e)
     if not errors:
