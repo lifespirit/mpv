@@ -90,6 +90,115 @@ static void resize(struct vo *vo)
     vo->want_redraw = true;
 }
 
+#if HAVE_DRM
+// The calibration pair is rendered only once. Put an identical ruler into
+// BOTH eyes' GBM buffers, so the ruler itself never flickers or contributes
+// to the black/white optical leakage boundary under test. It is not OSD and
+// does not run on the KMS or USB scheduling threads.
+//
+// All positions below use top-left image coordinates. The ra_gl clear
+// scissor uses bottom-left coordinates, so invert Y explicitly.
+static void stereo_ruler_rect(struct ra *ra, struct ra_tex *tex,
+                             float color[4], int x0, int y0, int x1, int y1)
+{
+    const int w = tex->params.w, h = tex->params.h;
+    x0 = MPMAX(0, MPMIN(w, x0));
+    x1 = MPMAX(0, MPMIN(w, x1));
+    y0 = MPMAX(0, MPMIN(h, y0));
+    y1 = MPMAX(0, MPMIN(h, y1));
+    if (x1 <= x0 || y1 <= y0)
+        return;
+    struct mp_rect scissor = {
+        .x0 = x0, .y0 = h - y1, .x1 = x1, .y1 = h - y0,
+    };
+    ra->fns->clear(ra, tex, color, &scissor);
+}
+
+// 3x5 pixel glyphs: 0..9 and %. Only those glyphs are drawn, without font
+// loading, subtitles, GL shaders or video timing dependencies.
+static const unsigned char stereo_ruler_glyphs[11][5] = {
+    {7, 5, 5, 5, 7}, // 0
+    {2, 6, 2, 2, 7}, // 1
+    {7, 1, 7, 4, 7}, // 2
+    {7, 1, 7, 1, 7}, // 3
+    {5, 5, 7, 1, 1}, // 4
+    {7, 4, 7, 1, 7}, // 5
+    {7, 4, 7, 5, 7}, // 6
+    {7, 1, 2, 2, 2}, // 7
+    {7, 5, 7, 5, 7}, // 8
+    {7, 5, 7, 1, 7}, // 9
+    {5, 1, 2, 4, 5}, // %
+};
+
+static void stereo_ruler_text(struct ra *ra, struct ra_tex *tex,
+                              int x, int top, int scale,
+                              float color[4], const char *label)
+{
+    for (int i = 0; label[i]; i++) {
+        int glyph = label[i] == '%' ? 10 :
+                    label[i] >= '0' && label[i] <= '9' ?
+                    label[i] - '0' : -1;
+        if (glyph < 0)
+            continue;
+        for (int y = 0; y < 5; y++) {
+            unsigned int bits = stereo_ruler_glyphs[glyph][y];
+            for (int col = 0; col < 3; col++) {
+                if (bits & (4u >> col)) {
+                    stereo_ruler_rect(ra, tex, color,
+                                     x + col * scale, top + y * scale,
+                                     x + (col + 1) * scale,
+                                     top + (y + 1) * scale);
+                }
+            }
+        }
+        x += 4 * scale;
+    }
+}
+
+static void stereo_calibration_draw_ruler(struct ra_ctx *ctx,
+                                          struct ra_tex *tex)
+{
+    const int w = tex->params.w, h = tex->params.h;
+    if (w < 320 || h < 240)
+        return;
+
+    // On 2560x1440: a 150 px strip at the right, every 1% tick,
+    // every 5% medium tick, large ticks and labels every 10%.
+    const int scale = h >= 1000 ? 4 : 2;
+    const int strip = MPMIN(scale == 4 ? 150 : 96, w / 3);
+    const int left = w - strip;
+    const int tick_x = left + 14;
+    const int text_x = left + (scale == 4 ? 57 : 43);
+    float bg[4] = {0.04f, 0.04f, 0.04f, 1.0f};
+    float edge[4] = {0.35f, 0.35f, 0.35f, 1.0f};
+    float faint[4] = {0.36f, 0.36f, 0.36f, 1.0f};
+    float medium[4] = {0.65f, 0.65f, 0.65f, 1.0f};
+    float bright[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+
+    struct ra *ra = ctx->ra;
+    stereo_ruler_rect(ra, tex, bg, left, 0, w, h);
+    stereo_ruler_rect(ra, tex, edge, left, 0, left + 2, h);
+    stereo_ruler_rect(ra, tex, edge, tick_x, 0, tick_x + 2, h);
+    for (int percent = 0; percent <= 100; percent++) {
+        int top = (percent * (h - 1) + 50) / 100;
+        bool major = percent % 10 == 0;
+        bool mid = percent % 5 == 0;
+        int length = major ? 34 : mid ? 22 : 11;
+        float *ink = major ? bright : mid ? medium : faint;
+        stereo_ruler_rect(ra, tex, ink, tick_x, top - 1,
+                          tick_x + length, top + (major ? 2 : 1));
+        if (major) {
+            char label[8];
+            snprintf(label, sizeof(label), "%d%%", percent);
+            int label_top = MPMAX(3, MPMIN(h - 3 - scale * 5,
+                                          top - scale * 5 / 2));
+            stereo_ruler_text(ra, tex, text_x, label_top, scale,
+                              bright, label);
+        }
+    }
+}
+#endif
+
 static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 {
     struct gpu_priv *p = vo->priv;
@@ -128,6 +237,9 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
                     .y1 = fbo.tex->params.h,
                 };
                 p->ctx->ra->fns->clear(p->ctx->ra, fbo.tex, color, &full);
+                // Include the identical measurement ruler in both eyes,
+                // keeping calibration content fixed for KMS repetition.
+                stereo_calibration_draw_ruler(p->ctx, fbo.tex);
                 vo->drm->stereo_draw_eye = eye;
                 ++vo->drm->stereo_draws;
                 vo_drm_stereo_pair_note_eye_render(p->ctx, eye, 0);
