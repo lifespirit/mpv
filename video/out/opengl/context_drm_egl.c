@@ -126,6 +126,9 @@ struct stereo_usb {
     // after its rate-derived initialization. timer_fd belongs to USB thread.
     bool phase_scheduler;
     bool phase_event_trace; // opt-in exceptional event timestamps; USB thread only
+    // Disable optional MP_INFO/MP_WARN calls *in the timing-critical USB worker*.
+    // This is independent of --msg-level: mpv's --log-file retains INFO.
+    bool phase_worker_logging;
     int timer_fd;
     int64_t phase_period_ns;
     atomic_int phase_us; // manual base offset; ramp adds a separate delta
@@ -2212,7 +2215,7 @@ static void stereo_usb_trace_event(struct stereo_usb *u, const char *reason,
                                    int target_eye, int64_t now_ns,
                                    int64_t deadline_ns)
 {
-    if (!u->phase_event_trace)
+    if (!u->phase_worker_logging || !u->phase_event_trace)
         return;
     double elapsed_s = u->phase_ramp_start_ns > 0 && now_ns >=
                        u->phase_ramp_start_ns ?
@@ -2307,9 +2310,10 @@ static void stereo_usb_predicted_loop(struct stereo_usb *u, void *dev,
                         u->phase_ramp_start_ns = (int64_t)ust_us * 1000;
                         next_ramp_report_ns =
                             u->phase_ramp_start_ns + 30000000000LL;
-                        MP_INFO(ctx, "Stereo USB drift: started at "
-                                "confirmed MSC=%u (UST CLOCK_MONOTONIC)\n",
-                                msc);
+                        if (u->phase_worker_logging)
+                            MP_INFO(ctx, "Stereo USB drift: started at "
+                                    "confirmed MSC=%u (UST CLOCK_MONOTONIC)\n",
+                                    msc);
                     }
                 }
                 observed_msc = msc;
@@ -2416,22 +2420,25 @@ static void stereo_usb_predicted_loop(struct stereo_usb *u, void *dev,
         u->phase_ramp_effective_ns = effective_phase_ns;
         if (phase_clamped && !u->phase_ramp_clamped) {
             u->phase_ramp_limit_entries++;
-            MP_WARN(ctx, "Stereo USB drift: effective phase reached "
-                    "+/-4000 us limit after %.1fs; ramp is clamped. "
-                    "Stop the test and restart with a safer initial phase.\n",
-                    elapsed_ns / 1e9);
+            if (u->phase_worker_logging)
+                MP_WARN(ctx, "Stereo USB drift: effective phase reached "
+                        "+/-4000 us limit after %.1fs; ramp is clamped. "
+                        "Stop the test and restart with a safer initial phase.\n",
+                        elapsed_ns / 1e9);
         }
         u->phase_ramp_clamped = phase_clamped;
         if (u->phase_ramp_rate_ns_per_s && next_ramp_report_ns > 0 &&
             now >= next_ramp_report_ns) {
-            MP_INFO(ctx, "Stereo USB drift sample: elapsed_s=%.1f "
-                    "rate_us_per_s=%+.3f manual_phase_us=%d "
-                    "correction_us=%+.3f effective_phase_us=%+.3f "
-                    "clamped=%d\n",
-                    elapsed_ns / 1e9,
-                    u->phase_ramp_rate_ns_per_s / 1000.0, phase,
-                    u->phase_ramp_correction_ns / 1000.0,
-                    effective_phase_ns / 1000.0, phase_clamped);
+            if (u->phase_worker_logging) {
+                MP_INFO(ctx, "Stereo USB drift sample: elapsed_s=%.1f "
+                        "rate_us_per_s=%+.3f manual_phase_us=%d "
+                        "correction_us=%+.3f effective_phase_us=%+.3f "
+                        "clamped=%d\n",
+                        elapsed_ns / 1e9,
+                        u->phase_ramp_rate_ns_per_s / 1000.0, phase,
+                        u->phase_ramp_correction_ns / 1000.0,
+                        effective_phase_ns / 1000.0, phase_clamped);
+            }
             next_ramp_report_ns = now + 30000000000LL;
         }
         if (armed && phase != used_phase) {
@@ -2916,6 +2923,13 @@ static bool stereo_usb_start(struct ra_ctx *ctx)
         return false;
     }
     u->phase_scheduler = schedule && strcmp(schedule, "1") == 0;
+    const char *worker_log = getenv("MPV_DRM_STEREO_USB_WORKER_LOG");
+    if (worker_log && strcmp(worker_log, "0") && strcmp(worker_log, "1")) {
+        MP_ERR(ctx, "Stereo USB worker logging: expected 0 or 1, got '%s'\n",
+               worker_log);
+        return false;
+    }
+    u->phase_worker_logging = !worker_log || strcmp(worker_log, "0") != 0;
     const char *event_trace = getenv("MPV_DRM_STEREO_USB_EVENT_TRACE");
     if (event_trace && strcmp(event_trace, "0") &&
         strcmp(event_trace, "1")) {
@@ -2925,9 +2939,13 @@ static bool stereo_usb_start(struct ra_ctx *ctx)
     }
     u->phase_event_trace = u->phase_scheduler && event_trace &&
                            strcmp(event_trace, "1") == 0;
-    if (u->phase_event_trace)
+    if (u->phase_event_trace && u->phase_worker_logging)
         MP_INFO(ctx, "Stereo USB event trace: enabled (exceptional USB "
                 "scheduler events only; no extra KMS-thread logging)\n");
+    if (!u->phase_worker_logging)
+        MP_INFO(ctx, "Stereo USB worker optional logs: DISABLED "
+                "(diagnostic calls skipped; fatal/error logs retained; "
+                "end-of-run counters retained)\n");
     u->timestamp_monotonic = drm->stereo_ust_monotonic;
     u->refresh_hz = vo_drm_get_display_fps(drm); // PHYSICAL, not logical 60 Hz.
     if (u->phase_scheduler) {
