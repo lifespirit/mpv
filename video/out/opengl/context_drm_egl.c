@@ -18,6 +18,7 @@
 #include <assert.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <math.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -47,6 +48,7 @@
 #include "egl_helpers.h"
 #include "common.h"
 #include "context.h"
+#include "stereo_usb_phase_ramp.h"
 
 #ifndef EGL_PLATFORM_GBM_MESA
 #define EGL_PLATFORM_GBM_MESA 0x31D7
@@ -125,7 +127,14 @@ struct stereo_usb {
     bool phase_scheduler;
     int timer_fd;
     int64_t phase_period_ns;
-    atomic_int phase_us; // signed command offset from TARGET vblank
+    atomic_int phase_us; // manual base offset; ramp adds a separate delta
+    // An experimental *signed rate* added to the host command deadline.
+    // 7000 ns/s = 7 us/s; all fields below owned by USB thread after init.
+    int64_t phase_ramp_rate_ns_per_s;
+    int64_t phase_ramp_start_ns, phase_ramp_elapsed_ns;
+    int64_t phase_ramp_correction_ns, phase_ramp_effective_ns;
+    bool phase_ramp_clamped;
+    uint64_t phase_ramp_limit_entries;
     atomic_uint_fast64_t phase_adjustments;
     uint64_t phase_armed, phase_sent, phase_deadline_misses;
     uint64_t phase_stale_drops, phase_parity_drops, phase_reanchors;
@@ -2833,6 +2842,31 @@ static bool stereo_usb_start(struct ra_ctx *ctx)
         initial_phase = (int)parsed;
     }
     atomic_init(&u->phase_us, initial_phase);
+    // Disabled by default, preserving the previous USB scheduling behavior.
+    // A signed positive rate sends progressively later relative to vblank;
+    // negative sends progressively earlier. Accept 0.001 us/s resolution.
+    const char *ramp = getenv("MPV_DRM_STEREO_USB_DRIFT_US_PER_S");
+    if (ramp && *ramp) {
+        if (!u->phase_scheduler) {
+            MP_ERR(ctx, "Stereo USB drift: requires "
+                   "MPV_DRM_STEREO_USB_PHASE_SCHED=1\n");
+            return false;
+        }
+        char *end = NULL;
+        errno = 0;
+        double parsed = strtod(ramp, &end);
+        if (errno || end == ramp || *end != '\0' ||
+            !isfinite(parsed) || fabs(parsed) > 20.0) {
+            MP_ERR(ctx, "Stereo USB drift: invalid rate '%s' "
+                   "(expected -20.000..+20.000 us/s)\n", ramp);
+            return false;
+        }
+        u->phase_ramp_rate_ns_per_s = (int64_t)llround(parsed * 1000.0);
+        MP_INFO(ctx, "Stereo USB drift: rate=%+.3f us/s "
+                "(host phase ramp, hardware/IR unchanged; "
+                "effective phase limited to +/-4000 us)\n",
+                u->phase_ramp_rate_ns_per_s / 1000.0);
+    }
     atomic_init(&u->phase_adjustments, 0);
     u->firmware = talloc_strdup(p, getenv("MPV_DRM_STEREO_USB_FIRMWARE")
                                    ? getenv("MPV_DRM_STEREO_USB_FIRMWARE")
