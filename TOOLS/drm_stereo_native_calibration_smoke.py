@@ -149,9 +149,17 @@ def main():
                         call("keypress", key)
                         time.sleep(.08)
 
-                for pattern in (1, 2, 3, 0):
+                for pattern in (1, 2, 0):
                     call("stereo-calibrate", "pattern", pattern)
                     time.sleep(.2)
+                # The removed fourth mode (old both-black) must not be
+                # accepted by either player or VO control.
+                try:
+                    call("stereo-calibrate", "pattern", 3)
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError("removed calibration pattern 3 was accepted")
 
                 call("stereo-calibrate", "accept")
                 time.sleep(.5)
@@ -165,7 +173,7 @@ def main():
                 time.sleep(.3)
                 if call("get_property", "pause") is not True:
                     raise AssertionError("C hotkey failed to open calibration")
-                call("keypress", "3")  # white in both eyes
+                call("keypress", "3")  # seven-step stereo depth ladder
                 time.sleep(.15)
                 call("keypress", "ENTER")
                 time.sleep(.3)
