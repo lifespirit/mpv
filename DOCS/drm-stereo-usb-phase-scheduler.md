@@ -82,13 +82,21 @@ This experimental branch adds a persistent **right-edge 0–100% height
 ruler** to the synthetic calibration screen (0% at the top, 100% at the
 bottom). Small ticks are 1% apart, medium ticks 5% apart, and bright
 numbered ticks are 10% apart. The sidebar is 150 pixels wide at
-2560x1440, with a dark backing and high-contrast white numbers.
+2560x1440.
 
-The raster is rendered **identically in both eye GBM buffers** when the
-calibration image is first captured. It therefore provides a stationary
-monocular reference adjacent to the white/black optical boundary,
-instead of introducing a second eye-dependent leakage artifact.
-No scale is present in movie frames, and no per-vblank rendering occurs.
+The ruler is deliberately **complementary between the eye buffers**:
+the white calibration eye gets a black ruler with white tick marks and
+labels; the black calibration eye gets a white ruler with black tick
+marks and labels. The ruler follows the actual calibration pattern,
+including the 1/2 eye-swap controls and the both-white/both-black
+patterns. Its opposite-contrast areas can make optical cross-talk
+and phase boundary motion easier to compare.
+
+The left/right buffers are drawn once per pattern, then KMS repeats
+the same pair. No scale is present in movie frames, and no per-vblank
+ruler rendering occurs. Because the ruler now alternates between
+opposite-contrast fields, it is itself sensitive to eye cross-talk,
+rather than acting as a common binocular reference.
 
 To compare against a completely unchanged all-white/all-black
 calibration screen, use `MPV_DRM_STEREO_CALIBRATION_RULER=0`.
@@ -97,8 +105,9 @@ The scale is enabled by default in this branch.
 To measure drift, hold the white/black image for 3-5 minutes without
 adjusting the phase arrows. Note where the **moving boundary in the
 main image** crosses the numbered scale after 0, 60, 120, 180 and 240
-seconds. The scale itself is drawn into BOTH eyes, so its white tick
-marks are not an optical-phase indicator; measure the adjacent field.
+seconds. The complementary marks can help locate the transition, but
+also compare against the adjacent flat calibration field to avoid
+mistaking LCD response / shutter cross-talk for a timing change.
 
 
 - LEFT: -100 us command phase (earlier).
