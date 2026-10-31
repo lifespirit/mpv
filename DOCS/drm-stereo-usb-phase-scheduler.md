@@ -124,6 +124,93 @@ Initial `MPV_DRM_STEREO_USB_PHASE_US` defaults to -1500. Accepted phase
 range is -4000 to +4000 us. Adjustments take effect in the USB scheduler,
 without changing firmware timer, KMS parity, film clock or QUEUE2/PLAN_HOLD.
 
+## Experimental linear drift compensation (separate branch)
+
+On `feature/drm-stereo-usb-phase-ramp`, retain the complementary
+calibration ruler from `feature/drm-stereo-calibration-ruler`.
+An **optional** signed host-only phase ramp lets us test whether
+gradually shifting `nvstusb_send_eye()` relative to physical KMS MSC
+cancels the observed ~5% screen-height/minute optical drift.
+
+```text
+effective_command_phase(t) = manual_phase_us + drift_us_per_s * elapsed_seconds
+```
+
+`elapsed_seconds` starts at the **first confirmed physical KMS flip**;
+we integrate in CLOCK_MONOTONIC using that flip's UST and retain
+nanosecond precision in the calculated `timerfd` deadline. No firmware
+timer, KMS flip, eye parity, movie PTS or screen frame rate is altered.
+Manual arrow controls adjust only the base phase and do **not** reset
+the drift integration clock.
+
+Set `MPV_DRM_STEREO_USB_DRIFT_US_PER_S` to a finite decimal number in
+`-20..+20` **with**
+`MPV_DRM_STEREO_USB=1 MPV_DRM_STEREO_USB_PHASE_SCHED=1`.
+Positive values gradually send USB commands later; negative values
+send earlier. Omit it or set `0` for exactly the previous behavior.
+The example +7.0us/s corresponds to +420us/min (about 5% of a
+120Hz scanout), **but the optical sign has not been established**.
+
+For the first controlled A/B study, keep everything else unchanged,
+including the same firmware, USB port, display mode, `--no-config`,
+`--drm-stereo-calibration=before-play`, the `L-white/R-black` pattern,
+`MPV_DRM_STEREO_USB_PHASE_US=-1500`, and an **unset**
+`NVSTUSB_EYE_TIMER_US`. Use **three independent launches** of the same
+3-minute stationary calibration pattern:
+
+- A: `MPV_DRM_STEREO_USB_DRIFT_US_PER_S=0`
+- B: `MPV_DRM_STEREO_USB_DRIFT_US_PER_S=+7`
+- C: `MPV_DRM_STEREO_USB_DRIFT_US_PER_S=-7`
+
+At 0, 60, 120, 180s, note the white/black transition height in
+percent, separately for each eye. Do not adjust arrows *during each
+measurement*; you can tune a common starting phase before starting a
+fresh run. If one sign produces clearly less drift, refine its slope
+(e.g. 5, 6, 8 or 9us/s) in another experiment.
+
+**Safety / limiting behavior:** The effective host phase stays between
+-4000 and +4000us relative to its TARGET vblank. If the requested
+manual plus drift offset exceeds either bound, the software **clamps**
+the phase and logs an explicit warning instead of silently wrapping
+the deadline to another MSC (which could invert the eye mapping).
+The ramp is therefore a SHORT DIAGNOSTIC, not yet a fix for a full movie.
+For example, starting at -1500us with -7us/s reaches -4000us after
+~357s. If a limit warning appears, STOP and restart; do not conclude
+that drift compensation has stopped working beyond its valid range.
+
+Every 30s the USB worker logs:
+
+```text
+Stereo USB drift sample: elapsed_s=... rate_us_per_s=... manual_phase_us=...
+correction_us=... effective_phase_us=... clamped=0
+```
+
+On exit it reports `Stereo USB drift final` with cumulative correction
+and `limit_entries`. These are **HOST command scheduling times**,
+not measured IR transmission or lens opening. The existing
+`Stereo USB scheduler final` remains unchanged for comparison.
+
+Hardware-free arithmetic check:
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -o /tmp/stereo-phase-math \
+  TOOLS/stereo_usb_phase_ramp_math_test.c
+/tmp/stereo-phase-math
+```
+
+With DRM hardware but *without* the IR emitter, exercise the updated
+USB-dry-run smoke path:
+
+```sh
+python3 TOOLS/drm_stereo_native_calibration_smoke.py \
+    --phase-scheduler --drift-us-per-s=7 \
+    --mpv ./build/mpv '/absolute/path/to/movie.mkv'
+```
+
+Neither test can prove optical correction. They test only integration
+and deadline arithmetic; observing the height ruler through the real
+shutters (ideally with a camera) remains necessary.
+
 ## Diagnostics and first test (do not use glasses for dry-run)
 
 ```bash
