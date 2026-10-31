@@ -33,10 +33,16 @@ the physical 120 Hz cadence. It does not decode a separate test clip.
 
 `c` toggles live timer control while the movie plays; `C` opens or
 closes the calibration screen. In calibration:
-- Left/Right: -/+100 us firmware timer; Up/Down: +25/-25 us.
-- 1: left white/right black; 2: left black/right white.
-- 3: both white; 4: both black.
-- Enter or Esc: return to the movie (preserves changed timer).
+- Left/Right: -/+100 us; Up/Down: +25/-25 us. With the predicted
+  USB phase scheduler, these adjust the HOST command deadline; without
+  it, they adjust the opt-in firmware timer instead.
+- 1: left white/right black, with a complementary 0-100% height ruler.
+- 2: left black/right white, with a complementary 0-100% height ruler.
+- 3: seven-step stereo depth ladder: three steps behind the screen,
+  one at zero disparity, three in front. Each step's number moves
+  together with its per-eye geometry; the ruler stays at screen depth.
+- 4: unbound (both-white/both-black calibration modes removed).
+- Enter or Esc: return to the movie (preserves phase/timer adjustments).
 - Usual seek arrows return when calibration/tuning exits.
 - Same commands can be sent over mpv's JSON IPC: `stereo-calibrate`
   with `screen`, `tune`, `pattern N`, `adjust N`, `accept`.
