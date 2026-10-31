@@ -62,7 +62,7 @@ struct gpu_priv {
     bool stereo_pair_valid;
     uint64_t stereo_pair_last_frame_id;
     struct mp_rect stereo_full_src;
-    int stereo_calibration_pattern; // -1=movie, 0..3=constant L/R test pair
+    int stereo_calibration_pattern; // -1=movie, 0/1=BW pair, 2=stereo depth ladder
     bool stereo_calibration_drawn;
 };
 static void resize(struct vo *vo)
@@ -210,6 +210,91 @@ static void stereo_calibration_draw_ruler(struct ra_ctx *ctx,
         }
     }
 }
+
+// Seven static stereo-disparity steps: top three recede behind the
+// screen, the middle is at the screen plane, and bottom three project
+// in front of it. Eye shifts are equal and opposite. No rendering occurs
+// on the real-time KMS or USB threads, only on pattern (re)capture.
+//
+// Positive disparity means crossed parallax (front of the screen):
+// left-eye x is to the RIGHT of right-eye x. Negative means behind.
+// On 2560px displays the per-level disparity is 16px: -48..+48px,
+// i.e. <= 1.9% of display width. Labels move with their own steps.
+static void stereo_calibration_draw_depth_ladder(struct ra_ctx *ctx,
+                                                 struct ra_tex *tex, int eye)
+{
+    const int w = tex->params.w, h = tex->params.h;
+    if (w < 320 || h < 240)
+        return;
+    struct ra *ra = ctx->ra;
+
+    // Draw common reference geometry at zero disparity in BOTH buffers.
+    // This helps distinguish true stereoscopic separation from ghosting.
+    float guide[4] = {0.20f, 0.24f, 0.28f, 1.0f};
+    float guide_mid[4] = {0.38f, 0.43f, 0.48f, 1.0f};
+    float outline[4] = {0.96f, 0.97f, 0.98f, 1.0f};
+    float inset[4] = {0.15f, 0.18f, 0.21f, 1.0f};
+    float ink[4] = {0.05f, 0.06f, 0.08f, 1.0f};
+
+    const int cx = w / 2;
+    const int width = MPMAX(100, MPMIN(w * 2 / 5, w - w / 4));
+    const int height = MPMAX(12, h / 23);
+    const int pitch = MPMAX(height + 5, h / 9);
+    const int first_y = (h - (6 * pitch + height)) / 2;
+    // Keep disparities even so each eye moves by an identical integer
+    // offset. All values remain safely below ~2% of screen width.
+    const int one_depth = 2 * MPMAX(2, MPMIN(12, w / 320));
+    const int stroke = MPMAX(2, h / 720);
+    const int scale = h >= 1000 ? 3 : 2;
+
+    stereo_ruler_rect(ra, tex, guide, cx - stroke / 2,
+                      h / 12, cx + (stroke + 1) / 2, h - h / 12);
+    stereo_ruler_rect(ra, tex, guide, w / 6, h / 2 - 1,
+                      w - w / 6, h / 2 + 1);
+    // A fixed screen-plane frame in both eyes, behind the steps.
+    stereo_ruler_rect(ra, tex, guide_mid, w / 8, h / 9,
+                      w / 8 + stroke, h - h / 9);
+    stereo_ruler_rect(ra, tex, guide_mid, w - w / 8 - stroke,
+                      h / 9, w - w / 8, h - h / 9);
+
+    for (int i = 0; i < 7; i++) {
+        // i=0: farthest back (uncrossed); i=3: screen; i=6:
+        // nearest (crossed). i=3 has EXACT zero binocular shift.
+        int depth = i - 3;
+        int disparity = depth * one_depth;
+        int eye_shift = eye == 0 ? disparity / 2 : -disparity / 2;
+        // A modest common X offset makes the set look like a staircase
+        // without changing the independently measurable parallax.
+        int x = cx - width / 2 + (i - 3) * w / 120 + eye_shift;
+        int y = first_y + i * pitch;
+        float face[4] = {
+            0.71f + i * 0.025f,
+            0.77f + i * 0.023f,
+            0.83f + i * 0.018f, 1.0f
+        };
+        if (i == 3) { // distinguish the screen-plane step
+            face[0] = 0.98f;
+            face[1] = 0.85f;
+            face[2] = 0.49f;
+        }
+
+        // Thick contrasting edges expose crosstalk and local shutter
+        // inversion; the inner mark also tests fine stereoscopic detail.
+        stereo_ruler_rect(ra, tex, outline, x - stroke, y - stroke,
+                          x + width + stroke, y + height + stroke);
+        stereo_ruler_rect(ra, tex, face, x, y, x + width, y + height);
+        stereo_ruler_rect(ra, tex, inset, x + 7 * stroke,
+                          y + height / 2 - stroke, x + width - 7 * stroke,
+                          y + height / 2 + stroke);
+        // Distinct digits 0..6 are part of the binocular object,
+        // not stationary OSD. They must move with its disparity.
+        char digit[2] = {(char)('0' + i), 0};
+        stereo_ruler_text(ra, tex, x + 3 * stroke,
+                          y + (height - scale * 5) / 2,
+                          scale, ink, digit);
+    }
+}
+
 #endif
 
 static bool draw_frame(struct vo *vo, struct vo_frame *frame)
@@ -237,11 +322,13 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
                 struct ra_fbo fbo;
                 if (!sw->fns->start_frame(sw, &fbo))
                     return VO_FALSE;
-                bool white = pat == 2 || (pat == 0 && eye == 0) ||
+                bool ladder = pat == 2;
+                bool white = (pat == 0 && eye == 0) ||
                              (pat == 1 && eye == 1);
-                float color[4] = {white ? 1.0f : 0.0f,
-                                  white ? 1.0f : 0.0f,
-                                  white ? 1.0f : 0.0f, 1.0f};
+                // The ladder has a neutral dark background in BOTH eyes;
+                // the bars (and their labels) carry per-eye disparity.
+                float level = ladder ? 0.07f : (white ? 1.0f : 0.0f);
+                float color[4] = {level, level, level, 1.0f};
                 // ra_gl.gl_clear() unconditionally dereferences scissor.
                 // NULL here crashed mpv with SIGSEGV on the first pattern.
                 struct mp_rect full = {
@@ -250,9 +337,15 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
                     .y1 = fbo.tex->params.h,
                 };
                 p->ctx->ra->fns->clear(p->ctx->ra, fbo.tex, color, &full);
-                // Complementary scales follow each eye's calibration field.
+                if (ladder) {
+                    stereo_calibration_draw_depth_ladder(p->ctx, fbo.tex, eye);
+                    // For the depth test the ruler is common to both eyes
+                    // (zero disparity), unlike the complementary BW scale.
+                    stereo_calibration_draw_ruler(p->ctx, fbo.tex, true);
+                } else {
+                    stereo_calibration_draw_ruler(p->ctx, fbo.tex, white);
+                }
                 // The pair remains fixed for repeated KMS scanouts.
-                stereo_calibration_draw_ruler(p->ctx, fbo.tex, white);
                 vo->drm->stereo_draw_eye = eye;
                 ++vo->drm->stereo_draws;
                 vo_drm_stereo_pair_note_eye_render(p->ctx, eye, 0);
@@ -491,7 +584,7 @@ static int control(struct vo *vo, uint32_t request, void *data)
         if (!p->stereo_pair || !data)
             return VO_FALSE;
         int pattern = *(int *)data;
-        if (pattern < -1 || pattern > 3)
+        if (pattern < -1 || pattern > 2)
             return VO_FALSE;
         if (pattern != p->stereo_calibration_pattern) {
             // Detach pending/queued but retain active and in-flight pairs.
