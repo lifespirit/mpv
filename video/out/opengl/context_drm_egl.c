@@ -125,6 +125,7 @@ struct stereo_usb {
     // Opt-in MSC/UST phase scheduler. This never modifies the firmware timer
     // after its rate-derived initialization. timer_fd belongs to USB thread.
     bool phase_scheduler;
+    bool phase_event_trace; // opt-in exceptional event timestamps; USB thread only
     int timer_fd;
     int64_t phase_period_ns;
     atomic_int phase_us; // manual base offset; ramp adds a separate delta
@@ -2203,6 +2204,29 @@ static bool stereo_usb_arm_absolute(int fd, int64_t due_ns)
     return timerfd_settime(fd, TFD_TIMER_ABSTIME, &it, NULL) == 0;
 }
 
+// Optional diagnostic event markers. Called ONLY in the normal USB sender
+// thread and ONLY for exceptional conditions. Optical shutter/IR timestamps
+// are not measurable here; this is CLOCK_MONOTONIC host-side telemetry.
+static void stereo_usb_trace_event(struct stereo_usb *u, const char *reason,
+                                   uint32_t target_msc, uint32_t observed_msc,
+                                   int target_eye, int64_t now_ns,
+                                   int64_t deadline_ns)
+{
+    if (!u->phase_event_trace)
+        return;
+    double elapsed_s = u->phase_ramp_start_ns > 0 && now_ns >=
+                       u->phase_ramp_start_ns ?
+                       (now_ns - u->phase_ramp_start_ns) / 1e9 : -1.0;
+    double relative_us = now_ns > 0 && deadline_ns > 0 ?
+                         (now_ns - deadline_ns) / 1000.0 : -1.0;
+    MP_WARN(u->ctx, "Stereo USB event: elapsed_s=%.6f reason=%s "
+            "target_msc=%u observed_msc=%u target_eye=%d "
+            "host_now_minus_deadline_us=%.3f "
+            "(host timing only, NOT optical IR)\n",
+            elapsed_s, reason, target_msc, observed_msc, target_eye,
+            relative_us);
+}
+
 // This is deliberately distinct from the old eventfd -> immediate USB path.
 // The KMS thread still only publishes one confirmed MSC/UST mailbox snapshot.
 // In the USB thread, predict a future edge and arm CLOCK_MONOTONIC timerfd.
@@ -2264,8 +2288,13 @@ static void stereo_usb_predicted_loop(struct stereo_usb *u, void *dev,
                 int eye = (int)(payload & 1u);
                 if (have_obs) {
                     uint32_t diff = msc - observed_msc;
-                    if (diff > 1 && diff < 1000)
+                    if (diff > 1 && diff < 1000) {
                         u->skipped += diff - 1;
+                        stereo_usb_trace_event(u, "mailbox_msc_skip",
+                                               msc, observed_msc, eye,
+                                               stereo_usb_monotonic_ns(),
+                                               (int64_t)ust_us * 1000);
+                    }
                 } else {
                     uint64_t first = atomic_load_explicit(
                         &u->first_confirmed_msc_plus_one, memory_order_acquire);
@@ -2293,10 +2322,16 @@ static void stereo_usb_predicted_loop(struct stereo_usb *u, void *dev,
                 // An earlier command whose target edge is ALREADY one or
                 // more full flips behind cannot be dispatched safely.
                 if (armed && (int32_t)(msc - target_msc) >= 1) {
+                    stereo_usb_trace_event(u, "stale_target", target_msc,
+                                           msc, target_eye,
+                                           stereo_usb_monotonic_ns(), due_ns);
                     armed = false;
                     u->phase_stale_drops++;
                 } else if (armed && msc == target_msc &&
                            eye != target_eye) {
+                    stereo_usb_trace_event(u, "target_eye_mismatch",
+                                           target_msc, msc, target_eye,
+                                           stereo_usb_monotonic_ns(), due_ns);
                     armed = false;
                     u->phase_parity_drops++;
                 }
@@ -2312,6 +2347,11 @@ static void stereo_usb_predicted_loop(struct stereo_usb *u, void *dev,
                 int64_t now = stereo_usb_monotonic_ns();
                 if (now < 0 || now - due_ns > max_send_late_ns ||
                     (have_obs && (int32_t)(observed_msc - target_msc) >= 1)) {
+                    stereo_usb_trace_event(u,
+                        now < 0 ? "clock_failure" :
+                        now - due_ns > max_send_late_ns ? "late_dispatch" :
+                        "obsolete_target", target_msc, observed_msc,
+                        target_eye, now, due_ns);
                     u->phase_deadline_misses++;
                     armed = false;
                 } else {
@@ -2335,6 +2375,12 @@ static void stereo_usb_predicted_loop(struct stereo_usb *u, void *dev,
                                     (end.tv_nsec - begin.tv_nsec) / 1e6;
                     u->max_usb_transfer_ms =
                         MPMAX(u->max_usb_transfer_ms, usb_ms);
+                    if (usb_ms >= 2.0)
+                        stereo_usb_trace_event(u, "slow_send_eye",
+                                               target_msc, observed_msc,
+                                               target_eye,
+                                               (int64_t)end.tv_sec * 1000000000LL +
+                                               end.tv_nsec, due_ns);
                     armed = false;
                     if (err) {
                         u->usb_errors++;
@@ -2400,6 +2446,9 @@ static void stereo_usb_predicted_loop(struct stereo_usb *u, void *dev,
                 stereo_usb_arm_absolute(u->timer_fd, due_ns)) {
                 u->phase_armed++;
             } else {
+                stereo_usb_trace_event(u, "manual_rearm_too_late",
+                                       target_msc, observed_msc, target_eye,
+                                       now, due_ns);
                 armed = false;
                 u->phase_too_late_to_arm++;
             }
@@ -2418,6 +2467,10 @@ static void stereo_usb_predicted_loop(struct stereo_usb *u, void *dev,
                     (int64_t)steps * u->phase_period_ns +
                     effective_phase_ns;
                 if (target_ns <= now + arm_guard_ns) {
+                    stereo_usb_trace_event(u, "target_too_late_to_arm",
+                                           next_msc, observed_msc,
+                                           observed_eye ^ (steps & 1),
+                                           now, target_ns);
                     u->phase_too_late_to_arm++;
                     continue;
                 }
@@ -2863,6 +2916,18 @@ static bool stereo_usb_start(struct ra_ctx *ctx)
         return false;
     }
     u->phase_scheduler = schedule && strcmp(schedule, "1") == 0;
+    const char *event_trace = getenv("MPV_DRM_STEREO_USB_EVENT_TRACE");
+    if (event_trace && strcmp(event_trace, "0") &&
+        strcmp(event_trace, "1")) {
+        MP_ERR(ctx, "Stereo USB event trace: expected 0 or 1, got '%s'\n",
+               event_trace);
+        return false;
+    }
+    u->phase_event_trace = u->phase_scheduler && event_trace &&
+                           strcmp(event_trace, "1") == 0;
+    if (u->phase_event_trace)
+        MP_INFO(ctx, "Stereo USB event trace: enabled (exceptional USB "
+                "scheduler events only; no extra KMS-thread logging)\n");
     u->timestamp_monotonic = drm->stereo_ust_monotonic;
     u->refresh_hz = vo_drm_get_display_fps(drm); // PHYSICAL, not logical 60 Hz.
     if (u->phase_scheduler) {
